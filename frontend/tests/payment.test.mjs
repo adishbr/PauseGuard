@@ -3,6 +3,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { createMockApi } from '../mocks/payment-api.ts'
+import { demoReviewDurationHeader, reviewDurations } from '../mocks/reviewPreference.ts'
 import { demoTokens } from '../mocks/scenarios.ts'
 import { formatRupees, toPaise } from '../src/services/demoSession.ts'
 import { isLocale, translator } from '../src/locales/messages.ts'
@@ -19,13 +20,13 @@ async function fixture(t) {
   await once(server, 'listening')
   t.after(() => new Promise((resolve) => server.close(resolve)))
 
-  async function call(path, token, body) {
+  async function call(path, token, body, headers = {}) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v2${path}`, {
       method: body ? 'POST' : 'GET',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...headers },
       body: body ? JSON.stringify(body) : undefined,
     })
-    return { code: response.status, body: await response.json() }
+    return { code: response.status, body: await response.json(), duration: response.headers.get(demoReviewDurationHeader) }
   }
 
   return {
@@ -93,17 +94,48 @@ test('guardian approval requires separate payer confirmation and duplicate retri
   assert.equal((await call(`${route}/cancel`, demoTokens.payer, {})).code, 409)
 })
 
-test('server time closes guardian review at the deadline and fallback cannot execute', async (t) => {
-  const { call, create, advance } = await fixture(t)
-  const payment = await create(coerced)
-  const route = `/payments/${payment.id}`
-  advance(29_999)
-  assert.equal((await call(`${route}/fallback/activate`, demoTokens.payer, {})).code, 409)
-  advance(1)
-  assert.equal((await call(`${route}/guardian/decision`, demoTokens.guardian, { decision: 'approve' })).code, 409)
-  assert.equal((await call(route, demoTokens.payer)).body.status, 'AWAITING_FALLBACK_REVIEW')
-  assert.equal((await call(`${route}/confirm`, demoTokens.payer, { idempotency_key: 'late' })).code, 409)
-  assert.equal((await call(`${route}/cancel`, demoTokens.payer, {})).body.status, 'CANCELLED')
+for (const seconds of reviewDurations) {
+  test(`the ${seconds}-second fixture deadline survives retries and expires without executing`, async (t) => {
+    const { call, advance } = await fixture(t)
+    const headers = { [demoReviewDurationHeader]: String(seconds) }
+    const created = await call('/payments', demoTokens.payer, coerced, headers)
+    assert.equal(created.code, 200)
+    assert.equal(created.duration, String(seconds))
+    const payment = created.body
+    const deadline = new Date(Date.parse('2026-11-09T10:00:00Z') + seconds * 1_000).toISOString()
+    assert.equal(payment.guardian_deadline, deadline)
+    const route = `/payments/${payment.id}`
+    const guardian = await call(route, demoTokens.guardian)
+    assert.equal(guardian.body.guardian_deadline, deadline)
+    assert.equal(guardian.duration, String(seconds))
+    assert.equal((await call(route, 'pauseguard-demo-unassigned-guardian')).duration, null)
+
+    advance(seconds * 1_000 - 1)
+    const duplicate = await call('/payments', demoTokens.payer, coerced, {
+      [demoReviewDurationHeader]: String(seconds === 30 ? 60 : 30),
+    })
+    assert.deepEqual(duplicate, created)
+    assert.equal((await call(`${route}/fallback/activate`, demoTokens.payer, {})).code, 409)
+    advance(1)
+    assert.equal((await call(`${route}/guardian/decision`, demoTokens.guardian, { decision: 'approve' })).code, 409)
+    const fallback = await call(route, demoTokens.payer)
+    assert.equal(fallback.body.status, 'AWAITING_FALLBACK_REVIEW')
+    assert.equal(fallback.body.version, payment.version + 1)
+    assert.equal(fallback.duration, null)
+    assert.equal((await call(`${route}/confirm`, demoTokens.payer, { idempotency_key: 'late' })).code, 409)
+    assert.equal((await call(`${route}/cancel`, demoTokens.payer, {})).body.status, 'CANCELLED')
+  })
+}
+
+test('the fixture validates duration hints and skips review for routine payments', async (t) => {
+  const { call } = await fixture(t)
+  const headers = (value) => ({ [demoReviewDurationHeader]: value })
+  assert.equal((await call('/payments', demoTokens.payer, coerced, headers('90'))).code, 422)
+  assert.equal((await call('/payments', demoTokens.payer, coerced, headers('30, 60'))).code, 422)
+  const result = await call('/payments', demoTokens.payer, routine, headers('60'))
+  assert.equal(result.body.status, 'READY_TO_EXECUTE')
+  assert.equal(result.body.guardian_deadline, null)
+  assert.equal(result.duration, null)
 })
 
 test('routine and warning flows do not alert a guardian, and a flagged fixture is rejected', async (t) => {

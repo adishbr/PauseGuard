@@ -1,4 +1,7 @@
 import { useEffect, useState } from 'react'
+import { defaultReviewDuration, parseReviewDuration } from '../mocks/reviewPreference.ts'
+import type { ReviewDuration } from '../mocks/reviewPreference.ts'
+import { ProtectionSettings } from './components/ProtectionSettings.tsx'
 import { Icon } from './components/Icon.tsx'
 import { isLocale, languages, translator } from './locales/messages.ts'
 import type { Locale } from './locales/messages.ts'
@@ -8,6 +11,7 @@ import { storageRead, storageWrite } from './services/demoSession.ts'
 import './App.css'
 
 const languageKey = 'pauseguard:demo:language'
+const protectionKey = 'pauseguard:demo:review-seconds'
 
 function App() {
   const guardian = window.location.pathname.replace(/\/$/, '') === '/guardian'
@@ -15,7 +19,15 @@ function App() {
     const saved = storageRead('localStorage', languageKey)
     return isLocale(saved) ? saved : 'en'
   })
+  const [reviewDuration, setReviewDuration] = useState(() =>
+    parseReviewDuration(storageRead('localStorage', protectionKey)) ?? defaultReviewDuration)
   const t = translator(locale)
+
+  function saveReviewDuration(duration: ReviewDuration) {
+    if (!storageWrite('localStorage', protectionKey, String(duration))) return false
+    setReviewDuration(duration)
+    return true
+  }
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -60,8 +72,12 @@ function App() {
         </div>
 
         <div className="workspace">
-          <div className="main-column">{guardian ? <Guardian locale={locale} /> : <Payer locale={locale} />}</div>
+          <div className="main-column">
+            {!guardian && <a className="mobile-settings-link" href="#payment-protection-settings">{t('protectionSettings')} <Icon name="arrow" size={16} /></a>}
+            {guardian ? <Guardian locale={locale} /> : <Payer locale={locale} reviewDuration={reviewDuration} />}
+          </div>
           <aside className="side-column" aria-label={t('about')}>
+            {!guardian && <ProtectionSettings saved={reviewDuration} save={saveReviewDuration} t={t} />}
             <section className="card side-card">
               <div className="symbol mint"><Icon name="users" /></div>
               <h2>{t('twoWindows')}</h2>

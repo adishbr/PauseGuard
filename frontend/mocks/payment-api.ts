@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { demoTokens, beneficiaries, purposes, demoReviewSeconds } from './scenarios.ts'
+import { demoTokens, beneficiaries, purposes } from './scenarios.ts'
+import { defaultReviewDuration, demoReviewDurationHeader, parseReviewDuration } from './reviewPreference.ts'
+import type { ReviewDuration } from './reviewPreference.ts'
 import { terminalStatuses } from '../src/types/payment.ts'
 import type { CreatePayment, GuardianPayment, PayerPayment, Status } from '../src/types/payment.ts'
 
 const API = '/api/v2'
-const REVIEW_MS = demoReviewSeconds * 1_000
 const PAYER = 'demo-payer'
 const ASSIGNED_GUARDIAN = 'demo-guardian'
 const actors = new Map([
@@ -19,6 +20,7 @@ interface PaymentRecord {
   input: CreatePayment
   payer: string
   guardian: string | null
+  reviewDuration?: ReviewDuration
   confirmationKey?: string
 }
 
@@ -105,6 +107,13 @@ export function createMockApi(clock: () => number = Date.now) {
     const path = new URL(request.url ?? '/', 'http://localhost').pathname
     if (!path.startsWith(`${API}/`)) return next()
 
+    function snapshot(record: PaymentRecord, role: string) {
+      if (record.payment.status === 'AWAITING_GUARDIAN' && record.reviewDuration) {
+        response.setHeader(demoReviewDurationHeader, record.reviewDuration)
+      }
+      return role === 'guardian' ? guardianView(record.payment) : record.payment
+    }
+
     async function handle() {
       const route = path.slice(API.length)
       const method = request.method
@@ -130,19 +139,25 @@ export function createMockApi(clock: () => number = Date.now) {
             throw new MockError(409, 'This payment reference already belongs to another request.')
           }
           expire(existing)
-          return existing.payment
+          return snapshot(existing, actor.role)
         }
+        // The demo adapter supplies a preference; the fixture owns deadline creation.
+        const durationHint = request.headers[demoReviewDurationHeader]
+        const requestedDuration = durationHint === undefined ? defaultReviewDuration : parseReviewDuration(durationHint)
+        if (!requestedDuration) throw new MockError(422, 'Choose 30, 45, or 60 seconds for guardian review.')
         const outcome = classify(input)
-        const review = outcome.status === 'AWAITING_GUARDIAN'
+        const reviewDuration = outcome.status === 'AWAITING_GUARDIAN' ? requestedDuration : undefined
         const payment: PayerPayment = {
           id: `pg_${randomUUID()}`, ...outcome, beneficiary_id, amount_paise, purpose, version: 1,
-          guardian_deadline: review ? new Date(clock() + REVIEW_MS).toISOString() : null,
+          guardian_deadline: reviewDuration ? new Date(clock() + reviewDuration * 1_000).toISOString() : null,
         }
         // The two synthetic accounts are pre-enrolled for this fixture only.
-        const record = { payment, input, payer: actor.id, guardian: review ? ASSIGNED_GUARDIAN : null }
+        const record = {
+          payment, input, payer: actor.id, guardian: reviewDuration ? ASSIGNED_GUARDIAN : null, reviewDuration,
+        }
         payments.set(payment.id, record)
         creations.set(key, record)
-        return payment
+        return snapshot(record, actor.role)
       }
 
       const [, resource, id, ...segments] = route.split('/')
@@ -155,7 +170,7 @@ export function createMockApi(clock: () => number = Date.now) {
       const { payment } = record
       if (method === 'GET' && !action) {
         expire(record)
-        return actor.role === 'guardian' ? guardianView(payment) : payment
+        return snapshot(record, actor.role)
       }
       if (method !== 'POST') throw new MockError(405, 'This method is unavailable for the payment.')
       if (action === 'guardian/decision') {

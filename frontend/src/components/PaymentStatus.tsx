@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { beneficiaries, demoReviewSeconds, purposes } from '../../mocks/scenarios.ts'
+import { beneficiaries, purposes } from '../../mocks/scenarios.ts'
 import { usePayment } from '../hooks/usePayment.ts'
 import type { MessageKey } from '../locales/en.ts'
 import { languages, translator } from '../locales/messages.ts'
@@ -176,11 +176,13 @@ export function PaymentStatus({ role, id, locale, onClose }: {
               <strong>{t(remaining === 0 ? 'deadlineChecking' : 'timeLeft')}</strong>
               <p>{t('deadlineSource')}</p>
             </div>
-            <span className="timer-value" aria-hidden="true">
+            <time className="timer-value" dateTime={deadline ?? undefined} aria-hidden="true">
               {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
-            </span>
+            </time>
             <span className="sr-only">{t('secondsRemaining')} {remaining}</span>
-            <progress aria-hidden="true" max={demoReviewSeconds} value={remaining} />
+            {snapshot?.reviewDuration && (
+              <progress aria-hidden="true" max={snapshot.reviewDuration} value={remaining} />
+            )}
           </div>
         )}
 

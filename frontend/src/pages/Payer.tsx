@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { defaultReviewDuration, parseReviewDuration } from '../../mocks/reviewPreference.ts'
+import type { ReviewDuration } from '../../mocks/reviewPreference.ts'
 import { beneficiaries, purposes, scenarios } from '../../mocks/scenarios.ts'
 import { Icon } from '../components/Icon.tsx'
 import { PaymentStatus } from '../components/PaymentStatus.tsx'
@@ -12,22 +14,32 @@ import { decimalRupees, isReference, payerKey, reviewKey, saveDraft, savedDraft,
 import type { CreatePayment } from '../types/payment.ts'
 
 const defaultScenario = scenarios[2]
+type DemoPaymentDraft = CreatePayment & { reviewDuration: ReviewDuration }
 
-function restoredDraft(): CreatePayment | undefined {
+function restoredDraft(): DemoPaymentDraft | undefined {
   const draft = savedDraft()
   if (!draft) return undefined
   try {
-    const parsed = JSON.parse(draft) as CreatePayment
+    const parsed = JSON.parse(draft) as Partial<DemoPaymentDraft>
     if (parsed && typeof parsed.idempotency_key === 'string' && parsed.idempotency_key.trim() &&
-      Number.isSafeInteger(parsed.amount_paise) && parsed.amount_paise > 0 &&
-      Object.hasOwn(beneficiaries, parsed.beneficiary_id) && Object.hasOwn(purposes, parsed.purpose)) return parsed
+      typeof parsed.amount_paise === 'number' && Number.isSafeInteger(parsed.amount_paise) && parsed.amount_paise > 0 &&
+      typeof parsed.beneficiary_id === 'string' && Object.hasOwn(beneficiaries, parsed.beneficiary_id) &&
+      typeof parsed.purpose === 'string' && Object.hasOwn(purposes, parsed.purpose)) {
+      return {
+        idempotency_key: parsed.idempotency_key,
+        amount_paise: parsed.amount_paise,
+        beneficiary_id: parsed.beneficiary_id,
+        purpose: parsed.purpose,
+        reviewDuration: parseReviewDuration(parsed.reviewDuration) ?? defaultReviewDuration,
+      }
+    }
   } catch {
     // Ignore invalid local demo drafts.
   }
 }
 
-function PaymentForm({ locale, onCreated, focusHeading }: {
-  locale: Locale; onCreated: (id: string) => void; focusHeading: boolean
+function PaymentForm({ locale, onCreated, focusHeading, reviewDuration }: {
+  locale: Locale; onCreated: (id: string) => void; focusHeading: boolean; reviewDuration: ReviewDuration
 }) {
   const t = translator(locale)
   const [pending, setPending] = useState(restoredDraft)
@@ -58,19 +70,21 @@ function PaymentForm({ locale, onCreated, focusHeading }: {
       setError('offline')
       return
     }
-    const input = pending ?? {
+    const draft = pending ?? {
       amount_paise: paise,
       beneficiary_id: beneficiary,
       purpose,
       idempotency_key: crypto.randomUUID(),
+      reviewDuration,
     }
     sending.current = true
     setBusy(true)
     setError(undefined)
-    setPending(input)
-    saveDraft(JSON.stringify(input))
+    setPending(draft)
+    saveDraft(JSON.stringify(draft))
+    const { reviewDuration: requestedDuration, ...input } = draft
     try {
-      const { payment } = await createPayment(input)
+      const { payment } = await createPayment(input, requestedDuration)
       if (payment.guardian_deadline && payment.status === 'AWAITING_GUARDIAN') {
         storageWrite('localStorage', reviewKey, payment.id)
       }
@@ -166,7 +180,7 @@ function PaymentForm({ locale, onCreated, focusHeading }: {
   )
 }
 
-export function Payer({ locale }: { locale: Locale }) {
+export function Payer({ locale, reviewDuration }: { locale: Locale; reviewDuration: ReviewDuration }) {
   const [id, setId] = useState(() => {
     const previous = storageRead('sessionStorage', payerKey)
     return isReference(previous) ? previous : ''
@@ -180,5 +194,5 @@ export function Payer({ locale }: { locale: Locale }) {
   }
 
   return id ? <PaymentStatus key={id} role="payer" id={id} locale={locale} onClose={() => selectPayment('')} /> :
-    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} />
+    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} reviewDuration={reviewDuration} />
 }

@@ -11,9 +11,9 @@ npm ci
 npm run dev
 ```
 
-1. Open the local URL shown by Vite. Select **Open guardian window** and keep the payer and guardian windows side by side.
-2. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
-3. Reject the request to stop the transfer, or approve the review to return control to the payer for a separate **Confirm simulated payment** action. If the 30-second review window closes first, both screens show the hold. The payer can stop the request.
+1. Open the local URL shown by Vite. In the payer's **Payment Protection Settings**, select **30 seconds**, **45 seconds**, or **60 seconds**, then choose **Save settings**. The default is 30 seconds. On a phone, the link above the payment steps jumps to the settings card.
+2. Select **Open guardian window**. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
+3. Reject the request to stop the transfer, or approve the review to return control to the payer for a separate **Confirm simulated payment** action. If the selected review window closes first, both screens show the hold. The payer can stop the request.
 4. Try **Everyday purchase** for a routine confirmation or **Unfamiliar supplier** for a warning before confirmation. Try **Flagged recipient** for an immediate simulated safety block. These cases skip guardian review.
 
 `npm run build` and `npm run preview` also support the local demo. The Vite fixture keeps state in memory. A server restart clears its requests. Browser reloads on the same server recover the selected request. An unavailable payer reference can be cleared from the status screen.
@@ -38,6 +38,8 @@ The browser uses the documented `/api/v2` payment paths with separate synthetic 
 | Cancel | `POST /payments/{id}/cancel` with an empty JSON object |
 | Confirm | `POST /payments/{id}/confirm` with `{"idempotency_key":"confirm:<payment-id>"}` |
 
+The demo saves the duration preference in the payer's browser. The client sends a demo-only `X-PauseGuard-Demo-Review-Seconds` header with the create request. The fixture validates the hint, sets `guardian_deadline` once when a review is required, and returns the effective window as a demo-only response header for the progress bar. The canonical request and response JSON remain unchanged. Both windows calculate the countdown from the same deadline. Saving another duration applies to future payments, and retries keep the original deadline.
+
 Komal should verify the fixture's guardian decision and confirmation payloads against the backend's eventual OpenAPI schema. The fixture advances the deadline on payment reads and applicable actions using server time. It models an execution state without a ledger. The browser polls active requests and refreshes on reconnect. The shared contract leaves event delivery for later integration. The client validates the response before rendering it and rejects guardian responses containing extra fields. The browser fixture tokens are public synthetic identifiers. Keep the server local.
 
 ## Checks
@@ -50,11 +52,11 @@ npm test
 
 With the demo server running and Playwright plus Chromium available, run `npm run test:browser`. Set `PLAYWRIGHT_MODULE` to the installed Playwright module path when using shared tooling. Optionally set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` for an existing Chromium binary or `PAUSEGUARD_TEST_ORIGIN` for a different local port.
 
-The browser cases cover the original two-window flows, mobile validation and focus, reduced motion, local fonts, warning acknowledgement, lost confirmation responses, malformed guardian payloads and blocked recipients. Fixture and client tests cover state transitions, authorization, expiry, replay, paise conversion and response validation.
+The browser cases cover the two-window flow and expiry at all three durations, preference persistence, refresh and reconnect during active review, mobile validation and focus, reduced motion, local fonts, warning acknowledgement, lost confirmation responses, malformed guardian payloads and blocked recipients. Fixture and client tests cover state transitions, authorization, expiry, replay, paise conversion and response validation.
 
 ## Phase 3 integration
 
 1. Confirm the `/api/v2` OpenAPI schema with Komal, including identity-scoped access, exact action payloads, errors, deadlines and idempotency. Exercise the same tests against the agreed backend fixture.
 2. Connect authenticated payer and guardian sessions and verified guardian enrollment. Keep the guardian payload limited and preserve authorization on every read and action.
 3. Agree on the privacy-safe event or notification contract. Re-fetch authoritative status on reconnect and keep expiry and fallback decisions on the backend.
-4. Integrate independent verification and any additional review-window options only after the backend supports them. Review the localized safety copy and test it on target devices.
+4. Replace the demo header with the agreed server-side preference contract. Continue to use the backend's `guardian_deadline` in both windows. Integrate independent verification when the backend supports it. Review the localized safety copy and test it on target devices.

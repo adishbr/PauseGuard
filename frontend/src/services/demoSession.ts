@@ -14,8 +14,10 @@ export function storageWrite(storage: 'localStorage' | 'sessionStorage', key: st
   try {
     if (value) window[storage].setItem(key, value)
     else window[storage].removeItem(key)
+    return true
   } catch {
     // Reference entry remains available when the browser blocks storage.
+    return false
   }
 }
 

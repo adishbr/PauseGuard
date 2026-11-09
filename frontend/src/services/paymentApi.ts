@@ -1,3 +1,5 @@
+import { demoReviewDurationHeader, parseReviewDuration } from '../../mocks/reviewPreference.ts'
+import type { ReviewDuration } from '../../mocks/reviewPreference.ts'
 import { demoTokens } from '../../mocks/scenarios.ts'
 import type { MessageKey } from '../locales/en.ts'
 import type { Role } from '../types/payment.ts'
@@ -31,13 +33,15 @@ async function request<R extends Role>(role: R, path: string, options: {
   body?: object
   id?: string
   signal?: AbortSignal
+  demoReviewDuration?: ReviewDuration
 } = {}) {
-  const { body, id, signal } = options
+  const { body, id, signal, demoReviewDuration } = options
   const timeout = AbortSignal.timeout(5_000)
   const startedAt = Date.now()
   try {
     const headers = new Headers({ Authorization: `Bearer ${demoTokens[role]}` })
     if (body) headers.set('Content-Type', 'application/json')
+    if (demoReviewDuration) headers.set(demoReviewDurationHeader, String(demoReviewDuration))
     const response = await fetch(`/api/v2${path}`, {
       method: body ? 'POST' : 'GET',
       headers,
@@ -55,7 +59,8 @@ async function request<R extends Role>(role: R, path: string, options: {
     if (timeout.aborted) throw new ApiError('requestTimeout')
     const payment = parsePayment(payload, role, id)
     if (!payment) throw new ApiError('invalidResponse')
-    return { payment: payment as R extends 'payer' ? PayerPayment : GuardianPayment, serverOffset }
+    const reviewDuration = parseReviewDuration(response.headers.get(demoReviewDurationHeader))
+    return { payment: payment as R extends 'payer' ? PayerPayment : GuardianPayment, serverOffset, reviewDuration }
   } catch (error) {
     if (error instanceof ApiError) throw error
     throw new ApiError(timeout.aborted ? 'requestTimeout' : 'networkError')
@@ -64,7 +69,8 @@ async function request<R extends Role>(role: R, path: string, options: {
 
 const paymentPath = (id: string) => `/payments/${encodeURIComponent(id)}`
 
-export const createPayment = (input: CreatePayment) => request('payer', '/payments', { body: input })
+export const createPayment = (input: CreatePayment, demoReviewDuration: ReviewDuration) =>
+  request('payer', '/payments', { body: input, demoReviewDuration })
 export const getPayment = (role: Role, id: string, signal: AbortSignal) => request(role, paymentPath(id), { id, signal })
 export const payerAction = (id: string, action: 'warning/acknowledge' | 'cancel' | 'confirm') =>
   request('payer', `${paymentPath(id)}/${action}`, {

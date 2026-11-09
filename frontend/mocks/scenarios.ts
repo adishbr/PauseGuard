@@ -21,5 +21,3 @@ export const scenarios = [
   { title: 'coerced', tag: 'guardianReview', beneficiary: 'supplier_new', amount: '55000', purpose: 'kyc_verification' },
   { title: 'flagged', tag: 'blocked', beneficiary: 'recipient_flagged', amount: '15000', purpose: 'purchase' },
 ] as const
-
-export const demoReviewSeconds = 30
