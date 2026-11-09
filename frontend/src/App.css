@@ -39,6 +39,8 @@ input, select { display: block; width: 100%; min-width: 0; min-height: 3rem; pad
 select { padding-right: 1.4rem; }
 input::placeholder { color: #9aadad; }
 .amount-field { display: flex; align-items: center; background: #0d181c; border: 1px solid #425b60; border-radius: .65rem; }
+.amount-field:focus-within { outline: 3px solid var(--mint); outline-offset: 2px; }
+.amount-field input:focus-visible { outline: none; }
 .amount-field > span { padding-left: .85rem; color: var(--mint); font-size: 1.35rem; }
 .amount-field input { font-size: 1.6rem; min-height: 3.5rem; background: transparent; border: 0; font-variant-numeric: tabular-nums; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; margin-top: 1.2rem; }
