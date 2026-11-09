@@ -1,123 +1,60 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
+import { Icon } from './components/Icon.tsx'
+import { Guardian } from './pages/Guardian.tsx'
+import { Payer } from './pages/Payer.tsx'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const guardian = window.location.pathname.replace(/\/$/, '') === '/guardian'
 
   return (
     <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+      <a className="skip-link" href="#main">Skip to payment workspace</a>
+      <header className="site-header">
+        <div className="frame topbar">
+          <a href="/" className="brand" aria-label="PauseGuard payer home">
+            <span className="brand-mark"><Icon name="shield" /></span>
+            <span>Pause<span>Guard</span></span>
+          </a>
+          <span className="demo-badge"><span /> Simulation mode</span>
         </div>
-        <div className="rounded-xl bg-emerald-600 p-6 text-2xl font-bold text-white">
-          PauseGuard — Tailwind CSS Working
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+      </header>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+      <main id="main" className="frame" tabIndex={-1}>
+        <div className="intro">
+          <div className="intro-copy">
+            <p className="eyebrow"><span className="line" /> {guardian ? 'Trusted reviewer' : 'Payment safety workspace'}</p>
+            <h1>{guardian ? <>Guardian <em>review.</em></> : <>Pause before <em>you pay.</em></>}</h1>
+            <p>{guardian ?
+              'Help a trusted payer make an informed decision while their payment is on hold.' :
+              'Check a payment for warning signs before you decide whether to send it.'}</p>
+          </div>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
+        <div className="workspace">
+          <div className="main-column">{guardian ? <Guardian /> : <Payer />}</div>
+          <aside className="side-column" aria-label="About this simulation">
+            <section className="card side-card">
+              <div className="symbol mint"><Icon name="users" /></div>
+              <h2>Two-window demo</h2>
+              <p>{guardian ? 'You’re in the guardian workspace. Keep it open while you start a review from the payer window.' :
+                'Open the guardian workspace alongside this one. Choose Coerced KYC transfer to see an independent review.'}</p>
+              <a className="secondary" href={guardian ? '/' : '/guardian'} target="_blank" rel="noopener">
+                Open {guardian ? 'payer' : 'guardian'} window <Icon name="external" size={18} />
+              </a>
+            </section>
+            <section className="card side-card privacy-card">
+              <div className="symbol"><Icon name="lock" /></div>
+              <h2>Private by default</h2>
+              <p>The two synthetic accounts are pre-enrolled for this demo. The guardian sees a safety request with a reference and deadline. Payment details stay in the payer workspace.</p>
+            </section>
+          </aside>
+        </div>
+      </main>
+
+      <footer className="frame site-footer">
+        <span><Icon name="shield" size={16} /> PauseGuard V2</span>
+        <span>Local simulation · Synthetic data · No money moves</span>
+      </footer>
     </>
   )
 }
