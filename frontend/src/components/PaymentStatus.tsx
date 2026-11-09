@@ -1,42 +1,46 @@
 import { useEffect, useRef, useState } from 'react'
-import { beneficiaries, purposes } from '../../mocks/scenarios.ts'
+import { beneficiaries, demoReviewSeconds, purposes } from '../../mocks/scenarios.ts'
 import { usePayment } from '../hooks/usePayment.ts'
+import type { MessageKey } from '../locales/en.ts'
+import { languages, translator } from '../locales/messages.ts'
+import type { Locale, Translate } from '../locales/messages.ts'
 import { formatRupees } from '../services/demoSession.ts'
-import { guardianDecision, payerAction } from '../services/paymentApi.ts'
+import { guardianDecision, payerAction, paymentError } from '../services/paymentApi.ts'
 import { terminalStatuses } from '../types/payment.ts'
 import type { Role, Status } from '../types/payment.ts'
 import { Icon } from './Icon.tsx'
+import { PaymentSteps } from './PaymentSteps.tsx'
 
-const labels: Record<Status, [string, string]> = {
-  CREATED: ['Checking payment', 'PauseGuard is evaluating the request.'],
-  AWAITING_WARNING: ['Review this payment', 'Verify the recipient using a contact method you already trust before continuing.'],
-  AWAITING_STEP_UP: ['Independent verification required', 'Stop and verify the request through a trusted channel. This demo cannot complete independent verification.'],
-  AWAITING_GUARDIAN: ['Waiting for your guardian', 'Your guardian can review this request before you decide whether to continue.'],
-  AWAITING_FALLBACK_REVIEW: ['Review window closed', 'The payment is still on hold. Verify the request independently or stop this payment.'],
-  READY_TO_EXECUTE: ['Ready for your confirmation', 'Check the details below. The simulated payment only completes after you confirm.'],
-  EXECUTED: ['Simulated payment completed', 'The demo API confirmed the transfer.'],
-  REJECTED: ['Payment rejected', 'The request was stopped before any simulated transfer.'],
-  CANCELLED: ['Payment stopped', 'You cancelled the request before any simulated transfer.'],
-  EXPIRED: ['Payment expired', 'The request closed before any simulated transfer.'],
-  FAILED: ['Payment failed', 'Start a new request after checking the details.'],
+type Copy = readonly [MessageKey, MessageKey]
+const labels: Record<Status, Copy> = {
+  CREATED: ['createdTitle', 'createdDetail'],
+  AWAITING_WARNING: ['warningTitle', 'warningDetail'],
+  AWAITING_STEP_UP: ['stepUpTitle', 'stepUpDetail'],
+  AWAITING_GUARDIAN: ['waitingTitle', 'waitingDetail'],
+  AWAITING_FALLBACK_REVIEW: ['fallbackTitle', 'fallbackDetail'],
+  READY_TO_EXECUTE: ['readyTitle', 'readyDetail'],
+  EXECUTED: ['executedTitle', 'executedDetail'],
+  REJECTED: ['rejectedTitle', 'rejectedDetail'],
+  CANCELLED: ['cancelledTitle', 'cancelledDetail'],
+  EXPIRED: ['expiredTitle', 'expiredDetail'],
+  FAILED: ['failedTitle', 'failedDetail'],
 }
 
-const guardianLabels: Partial<Record<Status, [string, string]>> = {
-  AWAITING_GUARDIAN: ['Review requested', 'If you can independently verify that the request is legitimate, you can let the payer continue. If you are unsure, stop the payment.'],
-  AWAITING_FALLBACK_REVIEW: ['Review window closed', 'The payment remains on hold and your decision is no longer accepted.'],
-  READY_TO_EXECUTE: ['Review approved', 'The payer still needs to confirm their simulated payment.'],
-  REJECTED: ['Payment rejected', 'The payment was stopped before any simulated transfer.'],
-  CANCELLED: ['Payment stopped', 'The payer cancelled the request.'],
+const guardianLabels: Partial<Record<Status, Copy>> = {
+  AWAITING_GUARDIAN: ['guardianPendingTitle', 'guardianPendingDetail'],
+  AWAITING_FALLBACK_REVIEW: ['fallbackTitle', 'guardianFallbackDetail'],
+  READY_TO_EXECUTE: ['guardianReadyTitle', 'guardianReadyDetail'],
+  CANCELLED: ['cancelledTitle', 'guardianCancelledDetail'],
 }
 
-const reasons: Record<string, string> = {
-  RC_NEW_BENEFICIARY: 'This recipient is unfamiliar for this demo account.',
-  RC_LARGE_DEVIATION: 'This amount is higher than the demo account’s usual payments.',
-  RC_COERCION_PURPOSE: 'Payment requests framed as KYC or verification can be a scam.',
-  RC_CUSTOMER_ALERT_PREFERENCE: 'This request meets the demo account’s alert preference.',
-}
-
-const tiers = ['Routine check', 'Safety warning', 'Extra verification', 'Safety restriction']
+const reasons = new Map<string, MessageKey>([
+  ['RC_NEW_BENEFICIARY', 'newRecipient'],
+  ['RC_LARGE_DEVIATION', 'largeDeviation'],
+  ['RC_COERCION_PURPOSE', 'coercion'],
+  ['RC_CUSTOMER_ALERT_PREFERENCE', 'alertPreference'],
+])
+const tiers = ['routineTier', 'warningTier', 'stepUpTier', 'restrictionTier'] as const
+type Action = 'confirm' | 'cancel' | 'warning/acknowledge' | 'approve' | 'reject'
 
 function useRemaining(deadline: string | null, offset: number) {
   const [now, setNow] = useState(Date.now)
@@ -48,26 +52,70 @@ function useRemaining(deadline: string | null, offset: number) {
   return deadline ? Math.max(0, Math.ceil((Date.parse(deadline) - now - offset) / 1_000)) : null
 }
 
-export function PaymentStatus({ role, id, onClose }: { role: Role, id: string, onClose: () => void }) {
+function Reference({ id, t }: { id: string; t: Translate }) {
+  const [feedback, setFeedback] = useState<'copied' | 'copyFallback'>()
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(id)
+      setFeedback('copied')
+    } catch {
+      setFeedback('copyFallback')
+    }
+  }
+
+  return (
+    <div className="reference">
+      <div className="reference-row">
+        <div>{t('reference')} <code>{id}</code></div>
+        <button className="text-button" type="button" onClick={() => void copy()}>{t('copy')}</button>
+      </div>
+      <div role="status">{feedback ? t(feedback) : ''}</div>
+    </div>
+  )
+}
+
+export function PaymentStatus({ role, id, locale, onClose }: {
+  role: Role; id: string; locale: Locale; onClose: () => void
+}) {
+  const t = translator(locale)
   const { snapshot, error, checking, accept, refresh } = usePayment(role, id)
   const [busy, setBusy] = useState(false)
-  const [actionError, setActionError] = useState('')
+  const [actionError, setActionError] = useState<{ status: Status; key: MessageKey }>()
   const inFlight = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
+  const checkedDeadline = useRef<string | null>(null)
   const payment = snapshot?.payment
-  const remaining = useRemaining(payment?.status === 'AWAITING_GUARDIAN' ? payment.guardian_deadline : null,
-    snapshot?.serverOffset ?? 0)
+  const status = payment?.status
+  const deadline = payment?.status === 'AWAITING_GUARDIAN' ? payment.guardian_deadline : null
+  const remaining = useRemaining(deadline, snapshot?.serverOffset ?? 0)
+  const terminal = status && terminalStatuses.has(status)
+  const disconnected = !terminal && Boolean(error)
+  const pendingCheck = !terminal && checking
 
-  async function act(action: 'confirm' | 'cancel' | 'warning/acknowledge' | 'approve' | 'reject') {
-    if (inFlight.current || checking || error) return
+  useEffect(() => {
+    if (document.activeElement === document.body) heading.current?.focus()
+  }, [status])
+
+  useEffect(() => {
+    if (remaining === 0 && deadline && !checking && !error && !busy && checkedDeadline.current !== deadline) {
+      checkedDeadline.current = deadline
+      refresh()
+    }
+  }, [remaining, deadline, checking, error, busy, refresh])
+
+  async function act(action: Action) {
+    if (inFlight.current || checking || error || !status) return
+    const guardianAction = action === 'approve' || action === 'reject'
+    if (guardianAction && (remaining === null || remaining === 0)) return
+
     inFlight.current = true
     setBusy(true)
-    setActionError('')
+    setActionError(undefined)
     try {
-      accept(action === 'approve' || action === 'reject' ?
-        await guardianDecision(id, action) : await payerAction(id, action))
+      accept(guardianAction ? await guardianDecision(id, action) : await payerAction(id, action))
     } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : 'The action could not be confirmed.')
+      setActionError({ status, key: paymentError(failure).key })
       refresh()
     } finally {
       inFlight.current = false
@@ -75,88 +123,113 @@ export function PaymentStatus({ role, id, onClose }: { role: Role, id: string, o
     }
   }
 
-  const status = payment?.status
-  useEffect(() => {
-    if (document.activeElement === document.body) heading.current?.focus()
-  }, [status])
-  const disabled = checking || Boolean(error) || busy
-  const terminal = status && terminalStatuses.has(status)
-  const showActions = status && !terminal
-  const tone = status === 'REJECTED' || status === 'FAILED' ? 'danger' :
+  const disabled = pendingCheck || disconnected || busy
+  const showActions = status && status !== 'CREATED' && !terminal
+  const tone = disconnected || pendingCheck ? 'neutral' :
+    status === 'REJECTED' || status === 'FAILED' ? 'danger' :
+    status === 'CANCELLED' || status === 'EXPIRED' ? 'neutral' :
     status?.startsWith('AWAITING_') ? 'caution' : 'mint'
   const [title, description] = status ?
     (role === 'guardian' ? guardianLabels[status] ?? labels[status] : labels[status]) :
-    ['Checking payment status', 'Connecting to the local demo API.']
+    ['checkingStatus', 'connecting'] as const
+  const statusDetail = role === 'payer' && payment?.status === 'REJECTED' && !payment.guardian_deadline ?
+    'blockedDetail' : description
+  const visibleTitle = disconnected ? 'unavailable' : pendingCheck ? 'checkingStatus' : title
   const paymentDetails = role === 'payer' && payment && 'amount_paise' in payment ? payment : undefined
+  const help = status?.startsWith('AWAITING_') || status === 'REJECTED'
+  const purpose = paymentDetails?.purpose ?? ''
 
   return (
-    <section className="card status-card" aria-labelledby="status-heading">
-      <div className="card-header">
-        <div className={`symbol ${tone}`}><Icon name={status === 'EXECUTED' ? 'check' : 'shield'} /></div>
-        <div className="grow">
-          <p className="eyebrow">{role === 'guardian' ? 'Guardian inbox' : 'Payment status'}</p>
-          <h2 id="status-heading" tabIndex={-1} ref={heading}>{error && !status ? 'Payment status unavailable' : title}</h2>
-        </div>
-        {payment && <span className={`pill ${tone}`}>{tiers[payment.tier]}</span>}
-      </div>
-
-      <div role="status" className="status-copy">
-        {checking && payment ? <p>Checking payment status…</p> : error && !status ? null : <p><span className="sr-only">{title}. </span>{description}</p>}
-        {busy && <p>Sending your action…</p>}
-      </div>
-      {error && (
-        <div className="notice">
-          <p role="alert">{error.message}</p>
-          <button className="secondary" type="button" disabled={checking || busy} onClick={refresh}>Retry connection</button>
-        </div>
-      )}
-      {actionError && <p className="notice" role="alert">{actionError}</p>}
-
-      {status === 'AWAITING_GUARDIAN' && (
-        <div className="timer">
-          <Icon name="clock" />
-          <div>
-            <strong>{remaining === 0 ? 'Checking whether the review has closed' : 'Time left to review'}</strong>
-            <p>Review time is set by the demo API.</p>
+    <>
+      {role === 'payer' && <PaymentSteps current={terminal ? 2 : 1} t={t} />}
+      <section className={`card workspace-card status-card tone-${tone}`} aria-labelledby="status-heading">
+        <div className="card-header">
+          <div className={`symbol ${tone}`}><Icon name={status === 'EXECUTED' ? 'check' : status === 'AWAITING_GUARDIAN' ? 'clock' : 'shield'} /></div>
+          <div className="grow">
+            <p className="eyebrow">{t(role === 'guardian' ? 'guardianInbox' : 'status')}</p>
+            <h2 id="status-heading" tabIndex={-1} ref={heading}>{t(visibleTitle)}</h2>
           </div>
-          {remaining !== null && <span className="timer-value" aria-label={`${remaining} seconds remaining`}>0:{String(remaining).padStart(2, '0')}</span>}
+          {payment && !disconnected && !pendingCheck && <span className={`pill ${tone}`}>{t(tiers[payment.tier])}</span>}
         </div>
-      )}
 
-      {paymentDetails && (
-        <dl className="payment-details">
-          <div><dt>Amount</dt><dd>{formatRupees(paymentDetails.amount_paise)}</dd></div>
-          <div><dt>Recipient</dt><dd>{beneficiaries[paymentDetails.beneficiary_id as keyof typeof beneficiaries] ?? paymentDetails.beneficiary_id}</dd></div>
-          <div><dt>Purpose</dt><dd>{purposes[paymentDetails.purpose as keyof typeof purposes] ?? paymentDetails.purpose}</dd></div>
-        </dl>
-      )}
-      {paymentDetails && paymentDetails.reason_codes.length > 0 && (
-        <ul className="reasons">
-          {paymentDetails.reason_codes.map((code) => <li key={code}>{reasons[code] ?? 'PauseGuard flagged a detail for review.'}</li>)}
-        </ul>
-      )}
-      {payment && <p className="reference">Request reference <code>{payment.id}</code></p>}
+        <div role="status" className="status-copy">
+          {pendingCheck && <p className="inline-progress"><span className="spinner" aria-hidden="true" />{t(payment ? 'checkingStatus' : 'connecting')}</p>}
+          {!pendingCheck && !disconnected && <p><span className="sr-only">{t(title)}. </span>{t(statusDetail)}</p>}
+          {(pendingCheck || disconnected) && payment && <p>{t('lastKnown')}</p>}
+          {busy && <p className="inline-progress"><span className="spinner" aria-hidden="true" />{t('sending')}</p>}
+        </div>
 
-      <div className="actions">
-        {showActions && role === 'payer' && (
-          <>
-            {status === 'READY_TO_EXECUTE' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('confirm')}>Confirm simulated payment <Icon name="arrow" size={18} /></button>}
-            {status === 'AWAITING_WARNING' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('warning/acknowledge')}>I verified the recipient <Icon name="arrow" size={18} /></button>}
-            <button type="button" className="secondary" disabled={disabled} onClick={() => void act('cancel')}>Stop this payment</button>
-          </>
+        {error && (
+          <div className="notice">
+            <p role="alert">{t(error.key)}</p>
+            <button className="secondary" type="button" disabled={checking || busy} onClick={refresh}>{t('retryConnection')}</button>
+          </div>
         )}
-        {status === 'AWAITING_GUARDIAN' && role === 'guardian' && (
-          <>
-            <button type="button" className="reject" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('reject')}>Reject payment</button>
-            <button type="button" className="secondary" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('approve')}>Approve review</button>
-          </>
+        {actionError && !checking && !error && status === actionError.status && (
+          <p className="notice" role="alert">{t(actionError.key)} {t('actionUnconfirmed')}</p>
         )}
-        {role === 'guardian' && <button type="button" className="text-button" disabled={busy} onClick={onClose}>Back to inbox</button>}
-        {role === 'payer' && error?.status === 404 && (
-          <button type="button" className="secondary" onClick={onClose}>Clear unavailable request</button>
+
+        {remaining !== null && !disconnected && (
+          <div className="timer">
+            <Icon name="clock" />
+            <div>
+              <strong>{t(remaining === 0 ? 'deadlineChecking' : 'timeLeft')}</strong>
+              <p>{t('deadlineSource')}</p>
+            </div>
+            <span className="timer-value" aria-hidden="true">
+              {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
+            </span>
+            <span className="sr-only">{t('secondsRemaining')} {remaining}</span>
+            <progress aria-hidden="true" max={demoReviewSeconds} value={remaining} />
+          </div>
         )}
-        {role === 'payer' && terminal && <button type="button" className="primary" onClick={onClose}>Start another payment <Icon name="arrow" size={18} /></button>}
-      </div>
-    </section>
+
+        {paymentDetails && (
+          <dl className="payment-details">
+            <div><dt>{t('amount')}</dt><dd>{formatRupees(paymentDetails.amount_paise, languages[locale].region)}</dd></div>
+            <div><dt>{t('recipient')}</dt><dd>{Object.hasOwn(beneficiaries, paymentDetails.beneficiary_id) ?
+              beneficiaries[paymentDetails.beneficiary_id as keyof typeof beneficiaries] : paymentDetails.beneficiary_id}</dd></div>
+            <div><dt>{t('purpose')}</dt><dd>{Object.hasOwn(purposes, purpose) ? t(purpose as keyof typeof purposes) : purpose}</dd></div>
+          </dl>
+        )}
+        {paymentDetails && paymentDetails.reason_codes.length > 0 && (
+          <div className="risk-context">
+            <h3>{t('why')}</h3>
+            <ul className="reasons">
+              {paymentDetails.reason_codes.map((code) => <li key={code}>{t(reasons.get(code) ?? 'genericReason')}</li>)}
+            </ul>
+          </div>
+        )}
+        {help && !disconnected && (
+          <details className="verify-note">
+            <summary>{t('verify')}</summary>
+            <p>{t(role === 'guardian' ? 'guardianVerify' : 'payerVerify')}</p>
+          </details>
+        )}
+
+        <div className="actions">
+          {showActions && role === 'payer' && (
+            <>
+              {status === 'READY_TO_EXECUTE' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('confirm')}>{t('confirm')} <Icon name="arrow" size={18} /></button>}
+              {status === 'AWAITING_WARNING' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('warning/acknowledge')}>{t('acknowledge')} <Icon name="arrow" size={18} /></button>}
+              <button type="button" className="secondary" disabled={disabled} onClick={() => void act('cancel')}>{t('stop')}</button>
+            </>
+          )}
+          {status === 'AWAITING_GUARDIAN' && role === 'guardian' && (
+            <>
+              <button type="button" className="reject" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('reject')}>{t('reject')}</button>
+              <button type="button" className="secondary" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('approve')}>{t('approve')}</button>
+            </>
+          )}
+          {role === 'guardian' && <button type="button" className="text-button" disabled={busy} onClick={onClose}>{t('back')}</button>}
+          {role === 'payer' && error?.status === 404 && (
+            <button type="button" className="secondary" disabled={checking} onClick={onClose}>{t('clearRequest')}</button>
+          )}
+          {role === 'payer' && terminal && <button type="button" className="primary" onClick={onClose}>{t('startAnother')} <Icon name="arrow" size={18} /></button>}
+        </div>
+        {payment && role === 'guardian' && <p className="privacy-line"><Icon name="lock" size={16} />{t('guardianPrivacy')}</p>}
+        {payment && <Reference id={payment.id} t={t} />}
+      </section>
+    </>
   )
 }

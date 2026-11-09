@@ -125,3 +125,93 @@ test('mobile keyboard entry and retry preserve the original creation key after a
   await payer.getByRole('button', { name: 'Stop this payment' }).click()
   await payer.getByRole('heading', { name: 'Payment stopped' }).waitFor()
 })
+
+test('mobile localization preserves the draft and presents validation, focus and reduced motion', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t, { viewport: { width: 360, height: 780 }, reducedMotion: 'reduce' })
+  const language = payer.locator('.locale-control select')
+  const amount = payer.locator('#amount')
+  const warning = payer.getByRole('alert')
+  await amount.fill('0')
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await warning.filter({ hasText: 'Enter a positive rupee amount' }).waitFor()
+  assert.equal(await amount.getAttribute('aria-invalid'), 'true')
+  assert.equal(await amount.evaluate((element) => element === document.activeElement), true)
+  assert.equal(await payer.locator('.amount-field').evaluate((el) => getComputedStyle(el).outlineStyle), 'solid')
+  assert.equal(await payer.locator('.workspace-card').evaluate((el) => getComputedStyle(el).animationName), 'none')
+  await amount.fill('100.05')
+  for (const [locale, family, sample] of [
+    ['kn', 'Noto Sans Kannada Variable', 'ಕನ್ನಡ'],
+    ['hi', 'Noto Sans Devanagari Variable', 'हिन्दी'],
+    ['te', 'Noto Sans Telugu Variable', 'తెలుగు'],
+  ]) {
+    await language.selectOption(locale)
+    await payer.waitForFunction((lang) => document.documentElement.lang === lang, locale)
+    const loaded = await payer.evaluate(async ([font, text]) => {
+      const faces = await document.fonts.load(`600 20px "${font}"`, text)
+      return faces.some((face) => face.status === 'loaded')
+    }, [family, sample])
+    assert.equal(loaded, true)
+    assert.equal(await amount.inputValue(), '100.05')
+    assert.equal(await payer.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
+  }
+  await payer.reload()
+  await payer.waitForFunction(() => document.documentElement.lang === 'te')
+  await language.selectOption('en')
+  await payer.getByRole('heading', { name: 'Prepare a payment' }).waitFor()
+})
+
+test('warning guidance and a lost confirmation response resolve to the authoritative outcome', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t)
+  await payer.getByRole('button', { name: 'Unfamiliar supplier' }).click()
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await payer.getByRole('heading', { name: 'Review this payment' }).waitFor()
+  assert.equal(await payer.locator('[aria-current="step"]').innerText(), '02\nReview')
+  await payer.getByText('How to verify the request', { exact: true }).click()
+  await payer.getByText(/Contact the recipient using a saved number/).waitFor()
+  await payer.getByRole('button', { name: 'I verified the recipient' }).click()
+  await payer.getByRole('heading', { name: 'Ready for your confirmation' }).waitFor()
+  assert.equal(await completion(payer).count(), 0)
+
+  let confirmationPosts = 0
+  await payer.route('**/confirm', async (route) => {
+    confirmationPosts += 1
+    await route.fetch()
+    await route.abort()
+  })
+  await payer.getByRole('button', { name: 'Confirm simulated payment' }).click()
+  await completion(payer).waitFor()
+  assert.equal(confirmationPosts, 1)
+  assert.equal(await payer.locator('[aria-current="step"]').innerText(), '03\nOutcome')
+  assert.equal(await payer.getByRole('alert').count(), 0)
+  await payer.getByRole('button', { name: 'Start another payment' }).click()
+  assert.equal(await payer.getByRole('heading', { name: 'Prepare a payment' }).evaluate((el) => el === document.activeElement), true)
+})
+
+test('guardian rejects an unexpected private response and recovers on a clean status check', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t)
+  const guardian = await openReview(payer)
+  const readPattern = '**/api/v2/payments/pg_*'
+  const leakedRead = async (route) => {
+    const response = await route.fetch()
+    const payment = await response.json()
+    await route.fulfill({ response, json: { ...payment, amount_paise: 5_500_000, beneficiary_id: 'Willow Supplies' } })
+  }
+  await guardian.route(readPattern, leakedRead)
+  await guardian.getByRole('heading', { name: 'Payment status unavailable' }).waitFor()
+  assert.doesNotMatch(await guardian.locator('main').innerText(), /55,000|Willow Supplies/)
+  assert.equal(await guardian.getByRole('button', { name: 'Approve review' }).isEnabled(), false)
+  await guardian.unroute(readPattern, leakedRead)
+  await guardian.getByRole('button', { name: 'Retry connection' }).click()
+  await guardian.getByRole('heading', { name: 'Review requested' }).waitFor()
+  assert.equal(await guardian.getByRole('button', { name: 'Approve review' }).isEnabled(), true)
+})
+
+test('flagged demo recipient is rejected without opening a guardian request', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t)
+  await payer.getByRole('button', { name: 'Flagged recipient' }).click()
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await payer.getByRole('heading', { name: 'Payment rejected' }).waitFor()
+  await payer.getByText(/A safety rule stopped this request/).waitFor()
+  assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
+  assert.equal(await payer.evaluate(() => localStorage.getItem('pauseguard:demo:guardian-request')), null)
+})

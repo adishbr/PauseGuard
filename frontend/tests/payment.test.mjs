@@ -5,6 +5,8 @@ import { test } from 'node:test'
 import { createMockApi } from '../mocks/payment-api.ts'
 import { demoTokens } from '../mocks/scenarios.ts'
 import { formatRupees, toPaise } from '../src/services/demoSession.ts'
+import { isLocale, translator } from '../src/locales/messages.ts'
+import { parsePayment } from '../src/services/paymentResponse.ts'
 
 const coerced = { beneficiary_id: 'supplier_new', amount_paise: 5_500_000, purpose: 'kyc_verification', idempotency_key: 'attempt-1' }
 const routine = { beneficiary_id: 'merchant_familiar', amount_paise: 10_000, purpose: 'purchase', idempotency_key: 'attempt-2' }
@@ -135,4 +137,50 @@ test('payer cancellation racing a guardian rejection keeps the terminal decision
   const winner = results.find(({ code }) => code === 200).body.status
   assert.ok(['CANCELLED', 'REJECTED'].includes(winner))
   assert.equal((await call(route, demoTokens.payer)).body.status, winner)
+})
+
+test('payment response validation fails closed for wrong references, malformed data and leaked guardian fields', () => {
+  const id = 'pg_test'
+  const guardian = { id, status: 'AWAITING_GUARDIAN', tier: 3, guardian_deadline: '2026-11-09T10:00:30Z', message: 'Review.' }
+  const payer = { ...guardian, amount_paise: 10_005, beneficiary_id: 'merchant_familiar', purpose: 'purchase',
+    version: 1, reason_codes: [], risk_score: 5 }
+
+  assert.deepEqual(parsePayment(guardian, 'guardian', id), guardian)
+  assert.equal(parsePayment(payer, 'payer', id).amount_paise, 10_005)
+  assert.equal(parsePayment({ ...guardian, amount_paise: 10_005 }, 'guardian', id), undefined)
+  assert.equal(parsePayment({ ...guardian, guardian_deadline: null }, 'guardian', id), undefined)
+  assert.equal(parsePayment({ ...guardian, guardian_deadline: 'invalid' }, 'guardian', id), undefined)
+  assert.equal(parsePayment({ ...guardian, status: 'PENDING_REVIEW' }, 'guardian', id), undefined)
+  assert.equal(parsePayment({ ...guardian, tier: 4 }, 'guardian', id), undefined)
+  assert.equal(parsePayment({ ...payer, amount_paise: '10005' }, 'payer', id), undefined)
+  assert.equal(parsePayment({ ...payer, status: 'EXECUTED', version: '1' }, 'payer', id), undefined)
+  assert.equal(parsePayment(guardian, 'guardian', 'pg_other'), undefined)
+})
+
+test('local-language input keeps exact paise and locale switches keep canonical payment keys', () => {
+  for (const input of ['१००.०५', '౧౦౦.౦౫', '೧೦೦.೦೫']) assert.equal(toPaise(input), 10_005)
+  assert.equal(toPaise('೧೦೦.೦೫೫'), null)
+  for (const locale of ['kn', 'hi', 'te']) {
+    assert.equal(isLocale(locale), true)
+    assert.notEqual(translator(locale)('confirm'), translator('en')('confirm'))
+    assert.notEqual(translator(locale)('fallbackDetail'), translator('en')('fallbackDetail'))
+  }
+  assert.equal(isLocale('unknown'), false)
+})
+
+test('the fixture rejects whitespace idempotency keys and leaves timeout decisions closed', async (t) => {
+  const { call, create, advance } = await fixture(t)
+  assert.equal((await call('/payments', demoTokens.payer, { ...coerced, idempotency_key: ' ' })).code, 422)
+  const payment = await create(coerced)
+  const route = `/payments/${payment.id}`
+  advance(30_000)
+  const [lateApproval, lateRejection, fallback] = await Promise.all([
+    call(`${route}/guardian/decision`, demoTokens.guardian, { decision: 'approve' }),
+    call(`${route}/guardian/decision`, demoTokens.guardian, { decision: 'reject' }),
+    call(`${route}/fallback/activate`, demoTokens.payer, {}),
+  ])
+  assert.equal(lateApproval.code, 409)
+  assert.equal(lateRejection.code, 409)
+  assert.equal(fallback.body.status, 'AWAITING_FALLBACK_REVIEW')
+  assert.equal((await call(route, demoTokens.payer)).body.version, payment.version + 1)
 })

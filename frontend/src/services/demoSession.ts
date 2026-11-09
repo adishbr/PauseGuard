@@ -32,7 +32,9 @@ export function saveDraft(value: string) {
 }
 
 export function toPaise(value: string) {
-  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value.trim())
+  const nativeDigits = '०१२३४५६७८९౦౧౨౩౪౫౬౭౮౯೦೧೨೩೪೫೬೭೮೯'
+  const normalized = value.trim().replace(/[०-९౦-౯೦-೯]/g, (digit) => String(nativeDigits.indexOf(digit) % 10))
+  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(normalized)
   if (!parts) return null
   const paise = Number(parts[1]) * 100 + Number((parts[2] ?? '').padEnd(2, '0'))
   return Number.isSafeInteger(paise) && paise > 0 ? paise : null
@@ -42,10 +44,10 @@ export function decimalRupees(paise: number) {
   return `${Math.floor(paise / 100)}.${String(paise % 100).padStart(2, '0')}`
 }
 
-const currency = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' })
-
-export function formatRupees(paise: number) {
+export function formatRupees(paise: number, locale = 'en-IN') {
+  const currency = new Intl.NumberFormat(locale, { style: 'currency', currency: 'INR' })
+  const fractionFormat = new Intl.NumberFormat(locale, { minimumIntegerDigits: 2, useGrouping: false })
   const [rupees, fraction] = decimalRupees(paise).split('.')
   return currency.formatToParts(Number(rupees)).map((part) =>
-    part.type === 'fraction' ? fraction : part.value).join('')
+    part.type === 'fraction' ? fractionFormat.format(Number(fraction)) : part.value).join('')
 }

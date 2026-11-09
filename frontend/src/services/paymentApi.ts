@@ -1,17 +1,39 @@
 import { demoTokens } from '../../mocks/scenarios.ts'
-import type { CreatePayment, GuardianPayment, PayerPayment, Role } from '../types/payment.ts'
+import type { MessageKey } from '../locales/en.ts'
+import type { Role } from '../types/payment.ts'
+import type { CreatePayment, GuardianPayment, PayerPayment } from '../types/payment.ts'
+import { parsePayment } from './paymentResponse.ts'
 
 export class ApiError extends Error {
+  readonly key: MessageKey
   readonly status: number
 
-  constructor(message: string, status: number) {
-    super(message)
+  constructor(key: MessageKey, status = 0) {
+    super(key)
+    this.key = key
     this.status = status
   }
 }
 
-async function request<T>(role: Role, path: string, body?: object) {
-  const signal = AbortSignal.timeout(5_000)
+export function paymentError(error: unknown): ApiError {
+  return error instanceof ApiError ? error : new ApiError('requestFailed')
+}
+
+function httpError(status: number) {
+  if (status === 401 || status === 403) return new ApiError('accessError', status)
+  if (status === 404) return new ApiError('notFound', status)
+  if (status === 409) return new ApiError('conflict', status)
+  if ([400, 413, 422].includes(status)) return new ApiError('invalidRequest', status)
+  return new ApiError('requestFailed', status)
+}
+
+async function request<R extends Role>(role: R, path: string, options: {
+  body?: object
+  id?: string
+  signal?: AbortSignal
+} = {}) {
+  const { body, id, signal } = options
+  const timeout = AbortSignal.timeout(5_000)
   const startedAt = Date.now()
   try {
     const headers = new Headers({ Authorization: `Bearer ${demoTokens[role]}` })
@@ -21,30 +43,32 @@ async function request<T>(role: Role, path: string, body?: object) {
       headers,
       body: body ? JSON.stringify(body) : undefined,
       cache: 'no-store',
-      signal,
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     })
+    if (!response.ok) throw httpError(response.status)
+
+    // HTTP Date has second precision. The midpoint limits skew from request latency.
     const serverDate = Date.parse(response.headers.get('Date') ?? '')
-    // The local fixture emits a standard HTTP Date header (whole seconds).
-    const measuredOffset = serverDate - startedAt
+    const measuredOffset = serverDate + 500 - (startedAt + Date.now()) / 2
     const serverOffset = Number.isFinite(measuredOffset) && Math.abs(measuredOffset) >= 1_000 ? measuredOffset : 0
-    const payload = await response.json()
-    if (!response.ok) {
-      throw new ApiError(typeof payload.detail === 'string' ? payload.detail : 'The request could not be completed.', response.status)
-    }
-    return { payment: payload as T, serverOffset }
+    const payload: unknown = await response.json().catch(() => undefined)
+    if (timeout.aborted) throw new ApiError('requestTimeout')
+    const payment = parsePayment(payload, role, id)
+    if (!payment) throw new ApiError('invalidResponse')
+    return { payment: payment as R extends 'payer' ? PayerPayment : GuardianPayment, serverOffset }
   } catch (error) {
     if (error instanceof ApiError) throw error
-    const message = signal.aborted ? 'The request timed out. Retry to check what happened.' :
-      'The demo API is unavailable. Reconnect to check payment status.'
-    throw new ApiError(message, 0)
+    throw new ApiError(timeout.aborted ? 'requestTimeout' : 'networkError')
   }
 }
 
 const paymentPath = (id: string) => `/payments/${encodeURIComponent(id)}`
 
-export const createPayment = (input: CreatePayment) => request<PayerPayment>('payer', '/payments', input)
-export const getPayment = (role: Role, id: string) => request<PayerPayment | GuardianPayment>(role, paymentPath(id))
+export const createPayment = (input: CreatePayment) => request('payer', '/payments', { body: input })
+export const getPayment = (role: Role, id: string, signal: AbortSignal) => request(role, paymentPath(id), { id, signal })
 export const payerAction = (id: string, action: 'warning/acknowledge' | 'cancel' | 'confirm') =>
-  request<PayerPayment>('payer', `${paymentPath(id)}/${action}`, action === 'confirm' ? { idempotency_key: `confirm:${id}` } : {})
+  request('payer', `${paymentPath(id)}/${action}`, {
+    id, body: action === 'confirm' ? { idempotency_key: `confirm:${id}` } : {},
+  })
 export const guardianDecision = (id: string, decision: 'approve' | 'reject') =>
-  request<GuardianPayment>('guardian', `${paymentPath(id)}/guardian/decision`, { decision })
+  request('guardian', `${paymentPath(id)}/guardian/decision`, { id, body: { decision } })

@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { demoTokens, beneficiaries, purposes } from './scenarios.ts'
+import { demoTokens, beneficiaries, purposes, demoReviewSeconds } from './scenarios.ts'
 import { terminalStatuses } from '../src/types/payment.ts'
 import type { CreatePayment, GuardianPayment, PayerPayment, Status } from '../src/types/payment.ts'
 
 const API = '/api/v2'
-const REVIEW_MS = 30_000
+const REVIEW_MS = demoReviewSeconds * 1_000
 const PAYER = 'demo-payer'
 const ASSIGNED_GUARDIAN = 'demo-guardian'
 const actors = new Map([
@@ -87,7 +87,7 @@ function classify(input: CreatePayment): Pick<PayerPayment, 'status' | 'tier' | 
 }
 
 function validKey(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 128
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128
 }
 
 export function createMockApi(clock: () => number = Date.now) {
@@ -185,7 +185,7 @@ export function createMockApi(clock: () => number = Date.now) {
         return payment
       }
       if (action === 'fallback/activate' && payment.status === 'AWAITING_FALLBACK_REVIEW') return payment
-      if (action === 'cancel' && !terminalStatuses.has(payment.status)) {
+      if (action === 'cancel' && payment.status !== 'CREATED' && !terminalStatuses.has(payment.status)) {
         transition(record, 'CANCELLED')
         return payment
       }

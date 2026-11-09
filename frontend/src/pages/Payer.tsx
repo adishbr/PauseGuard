@@ -1,9 +1,13 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { beneficiaries, purposes, scenarios } from '../../mocks/scenarios.ts'
 import { Icon } from '../components/Icon.tsx'
 import { PaymentStatus } from '../components/PaymentStatus.tsx'
-import { ApiError, createPayment } from '../services/paymentApi.ts'
+import { PaymentSteps } from '../components/PaymentSteps.tsx'
+import type { MessageKey } from '../locales/en.ts'
+import { translator } from '../locales/messages.ts'
+import type { Locale } from '../locales/messages.ts'
+import { createPayment, paymentError } from '../services/paymentApi.ts'
 import { decimalRupees, isReference, payerKey, reviewKey, saveDraft, savedDraft, storageRead, storageWrite, toPaise } from '../services/demoSession.ts'
 import type { CreatePayment } from '../types/payment.ts'
 
@@ -14,33 +18,46 @@ function restoredDraft(): CreatePayment | undefined {
   if (!draft) return undefined
   try {
     const parsed = JSON.parse(draft) as CreatePayment
-    if (parsed && typeof parsed.idempotency_key === 'string' && Number.isSafeInteger(parsed.amount_paise) &&
+    if (parsed && typeof parsed.idempotency_key === 'string' && parsed.idempotency_key.trim() &&
+      Number.isSafeInteger(parsed.amount_paise) && parsed.amount_paise > 0 &&
       Object.hasOwn(beneficiaries, parsed.beneficiary_id) && Object.hasOwn(purposes, parsed.purpose)) return parsed
   } catch {
-    // Invalid local demo drafts can be ignored.
+    // Ignore invalid local demo drafts.
   }
 }
 
-function PaymentForm({ onCreated }: { onCreated: (id: string) => void }) {
+function PaymentForm({ locale, onCreated, focusHeading }: {
+  locale: Locale; onCreated: (id: string) => void; focusHeading: boolean
+}) {
+  const t = translator(locale)
   const [pending, setPending] = useState(restoredDraft)
   const [beneficiary, setBeneficiary] = useState<string>(pending?.beneficiary_id ?? defaultScenario.beneficiary)
   const [amount, setAmount] = useState(pending ? decimalRupees(pending.amount_paise) : defaultScenario.amount)
   const [purpose, setPurpose] = useState<string>(pending?.purpose ?? defaultScenario.purpose)
-  const [error, setError] = useState('')
+  const [error, setError] = useState<MessageKey>()
+  const [invalidAmount, setInvalidAmount] = useState(false)
   const [busy, setBusy] = useState(false)
   const sending = useRef(false)
   const amountInput = useRef<HTMLInputElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+
+  useEffect(() => {
+    if (focusHeading) heading.current?.focus()
+  }, [focusHeading])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (sending.current) return
     const paise = toPaise(amount)
     if (paise === null) {
-      setError('Enter a positive rupee amount with up to two decimal places.')
+      setInvalidAmount(true)
       amountInput.current?.focus()
       return
     }
-
+    if (!navigator.onLine) {
+      setError('offline')
+      return
+    }
     const input = pending ?? {
       amount_paise: paise,
       beneficiary_id: beneficiary,
@@ -49,7 +66,7 @@ function PaymentForm({ onCreated }: { onCreated: (id: string) => void }) {
     }
     sending.current = true
     setBusy(true)
-    setError('')
+    setError(undefined)
     setPending(input)
     saveDraft(JSON.stringify(input))
     try {
@@ -60,11 +77,12 @@ function PaymentForm({ onCreated }: { onCreated: (id: string) => void }) {
       onCreated(payment.id)
       saveDraft('')
     } catch (failure) {
-      if (failure instanceof ApiError && [400, 422].includes(failure.status)) {
+      const problem = paymentError(failure)
+      if ([400, 413, 422].includes(problem.status)) {
         setPending(undefined)
         saveDraft('')
       }
-      setError(failure instanceof Error ? failure.message : 'Unable to start this demo payment.')
+      setError(problem.key)
     } finally {
       sending.current = false
       setBusy(false)
@@ -73,58 +91,72 @@ function PaymentForm({ onCreated }: { onCreated: (id: string) => void }) {
 
   return (
     <>
-      <section className="card" aria-labelledby="payment-heading">
+      <PaymentSteps current={0} t={t} />
+      <section className="card workspace-card" aria-labelledby="payment-heading">
         <div className="card-header">
           <div className="symbol mint"><Icon name="activity" /></div>
           <div>
-            <p className="eyebrow">Payer workspace</p>
-            <h2 id="payment-heading">Prepare a payment</h2>
+            <p className="eyebrow">{t('payerWorkspace')}</p>
+            <h2 id="payment-heading" ref={heading} tabIndex={-1}>{t('preparePayment')}</h2>
           </div>
         </div>
-        <form onSubmit={(event) => void submit(event)}>
+        <p className="card-lead">{t('formHint')}</p>
+        <form noValidate onSubmit={(event) => void submit(event)}>
           <fieldset disabled={Boolean(pending)} className="form-fields">
-            <label className="full">Amount (INR)
-              <span className="amount-field"><span aria-hidden="true">₹</span>
-                <input ref={amountInput} name="amount" inputMode="decimal" value={amount}
-                  onChange={(event) => setAmount(event.target.value)} required />
+            <div className="full form-field">
+              <label htmlFor="amount">{t('amountInput')}</label>
+              <span className={invalidAmount ? 'amount-field field-invalid' : 'amount-field'}>
+                <span aria-hidden="true">₹</span>
+                <input id="amount" ref={amountInput} name="amount" inputMode="decimal" value={amount}
+                  aria-invalid={invalidAmount || undefined} aria-describedby="amount-help"
+                  onChange={(event) => {
+                    setAmount(event.target.value)
+                    setInvalidAmount(false)
+                  }} required />
               </span>
-            </label>
-            <label>Demo recipient
+              <p id="amount-help" className={invalidAmount ? 'field-error' : 'field-help'} role={invalidAmount ? 'alert' : undefined}>
+                {t(invalidAmount ? 'amountInvalid' : 'amountHint')}
+              </p>
+            </div>
+            <label>{t('demoRecipient')}
               <select name="beneficiary" value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)}>
                 {Object.entries(beneficiaries).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
-            <label>Payment purpose
+            <label>{t('paymentPurpose')}
               <select name="purpose" value={purpose} onChange={(event) => setPurpose(event.target.value)}>
-                {Object.entries(purposes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                {Object.keys(purposes).map((value) => <option key={value} value={value}>{t(value as keyof typeof purposes)}</option>)}
               </select>
             </label>
           </fieldset>
-          {error && <p className="notice" role="alert">{error}</p>}
-          {pending && !busy && <p className="form-note">Retry to check the original request. The demo will reuse its payment reference.</p>}
+          {error && <p className="notice" role="alert">{t(error)}</p>}
+          {pending && !busy && <p className="form-note">{t('retryDraft')}</p>}
           <div className="actions">
             <button type="submit" className="primary" disabled={busy}>
-              {busy ? 'Checking payment…' : pending ? 'Retry this request' : 'Check payment'}
-              <Icon name="arrow" size={18} />
+              {busy && <span className="spinner" aria-hidden="true" />}
+              {t(busy ? 'checkingPayment' : pending ? 'retryRequest' : 'checkPayment')}
+              {!busy && <Icon name="arrow" size={18} />}
             </button>
           </div>
+          <div className="sr-only" role="status">{busy ? t('checkingPayment') : ''}</div>
         </form>
       </section>
 
       <section className="scenarios" aria-labelledby="scenarios-heading">
-        <h2 id="scenarios-heading">Try a demo scenario</h2>
+        <h2 id="scenarios-heading">{t('tryScenario')}</h2>
         <div className="scenario-list">
           {scenarios.map((scenario) => {
-            const selected = beneficiary === scenario.beneficiary && amount === scenario.amount && purpose === scenario.purpose
+            const selected = beneficiary === scenario.beneficiary && toPaise(amount) === toPaise(scenario.amount) && purpose === scenario.purpose
             return (
               <button className="scenario" type="button" key={scenario.title} aria-pressed={selected}
                 disabled={Boolean(pending)} onClick={() => {
                   setBeneficiary(scenario.beneficiary)
                   setAmount(scenario.amount)
                   setPurpose(scenario.purpose)
-                  setError('')
+                  setError(undefined)
+                  setInvalidAmount(false)
                 }}>
-                <span>{scenario.tag}</span><strong>{scenario.title}</strong>
+                <span>{t(scenario.tag)}</span><strong>{t(scenario.title)}</strong>
               </button>
             )
           })}
@@ -134,17 +166,19 @@ function PaymentForm({ onCreated }: { onCreated: (id: string) => void }) {
   )
 }
 
-export function Payer() {
+export function Payer({ locale }: { locale: Locale }) {
   const [id, setId] = useState(() => {
     const previous = storageRead('sessionStorage', payerKey)
     return isReference(previous) ? previous : ''
   })
+  const [returning, setReturning] = useState(false)
 
   function selectPayment(next: string) {
     storageWrite('sessionStorage', payerKey, next)
+    setReturning(!next)
     setId(next)
   }
 
-  return id ? <PaymentStatus key={id} role="payer" id={id} onClose={() => selectPayment('')} /> :
-    <PaymentForm onCreated={selectPayment} />
+  return id ? <PaymentStatus key={id} role="payer" id={id} locale={locale} onClose={() => selectPayment('')} /> :
+    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} />
 }

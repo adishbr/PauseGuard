@@ -1,16 +1,11 @@
 export type Role = 'payer' | 'guardian'
-export type Status =
-  | 'CREATED'
-  | 'AWAITING_WARNING'
-  | 'AWAITING_STEP_UP'
-  | 'AWAITING_GUARDIAN'
-  | 'AWAITING_FALLBACK_REVIEW'
-  | 'READY_TO_EXECUTE'
-  | 'EXECUTED'
-  | 'REJECTED'
-  | 'CANCELLED'
-  | 'EXPIRED'
-  | 'FAILED'
+export const paymentStatuses = [
+  'CREATED', 'AWAITING_WARNING', 'AWAITING_STEP_UP', 'AWAITING_GUARDIAN',
+  'AWAITING_FALLBACK_REVIEW', 'READY_TO_EXECUTE', 'EXECUTED', 'REJECTED',
+  'CANCELLED', 'EXPIRED', 'FAILED',
+] as const
+
+export type Status = typeof paymentStatuses[number]
 
 export interface CreatePayment {
   beneficiary_id: string

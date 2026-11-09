@@ -16,7 +16,10 @@ export const purposes = {
 } as const
 
 export const scenarios = [
-  { title: 'Everyday purchase', tag: 'Routine', beneficiary: 'merchant_familiar', amount: '100', purpose: 'purchase' },
-  { title: 'Unfamiliar supplier', tag: 'Warning', beneficiary: 'supplier_new', amount: '50000', purpose: 'supplier_payment' },
-  { title: 'Coerced KYC transfer', tag: 'Guardian review', beneficiary: 'supplier_new', amount: '55000', purpose: 'kyc_verification' },
+  { title: 'everyday', tag: 'routine', beneficiary: 'merchant_familiar', amount: '100', purpose: 'purchase' },
+  { title: 'unfamiliar', tag: 'warning', beneficiary: 'supplier_new', amount: '50000', purpose: 'supplier_payment' },
+  { title: 'coerced', tag: 'guardianReview', beneficiary: 'supplier_new', amount: '55000', purpose: 'kyc_verification' },
+  { title: 'flagged', tag: 'blocked', beneficiary: 'recipient_flagged', amount: '15000', purpose: 'purchase' },
 ] as const
+
+export const demoReviewSeconds = 30
