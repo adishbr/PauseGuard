@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "github.vscode-pull-request-github",
+    "ms-playwright.playwright"
+  ]
+}
