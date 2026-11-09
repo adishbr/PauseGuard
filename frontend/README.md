@@ -1,6 +1,6 @@
-# PauseGuard frontend · Phase 2
+# PauseGuard frontend · Demo accounts and guardian enrollment
 
-A local V2 payment simulation with a payer workspace and a privacy-limited guardian inbox. Use the synthetic recipient and purpose options. The two fixture accounts are pre-enrolled for the demo.
+A local V2 payment simulation with fictional payer and guardian accounts. Use the synthetic contact, recipient and purpose options.
 
 ## Run locally
 
@@ -11,12 +11,21 @@ npm ci
 npm run dev
 ```
 
-1. Open the local URL shown by Vite. In the payer's **Payment Protection Settings**, select **30 seconds**, **45 seconds**, or **60 seconds**, then choose **Save settings**. The default is 30 seconds. On a phone, the link above the payment steps jumps to the settings card.
-2. Select **Open guardian window**. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
+1. Open the local URL shown by Vite. Choose **Open sample payer** for the pre-enrolled walkthrough or **Sign up** to create a fictional payer. In the payer's **Payment Protection Settings**, select **30 seconds**, **45 seconds**, or **60 seconds**, then choose **Save settings**. The default is 30 seconds. On a phone, the link above the payment steps jumps to the settings card.
+2. Select **Open guardian window**. Choose **Open sample guardian** for the sample walkthrough or sign in with the fictional contact that accepted the invitation. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
 3. Reject the request to stop the transfer, or approve the review to return control to the payer for a separate **Confirm simulated payment** action. If the selected review window closes first, both screens show the hold. The payer can stop the request.
 4. Try **Everyday purchase** for a routine confirmation or **Unfamiliar supplier** for a warning before confirmation. Try **Flagged recipient** for an immediate simulated safety block. These cases skip guardian review.
 
 `npm run build` and `npm run preview` also support the local demo. The Vite fixture keeps state in memory. A server restart clears its requests. Browser reloads on the same server recover the selected request. An unavailable payer reference can be cleared from the status screen.
+
+## Accounts and protection
+
+- **Payer** — Sign up in two steps with a fictional name and a `.test` email or a synthetic 10-digit mobile beginning with `00000`. Choose an account category and language. Profile includes large text, business and recurring supplier preferences, a payment alert threshold, optional notifications, quiet hours, call consent and simulated Safe-Lock.
+- **Guardians** — Open **Guardians** on the payer dashboard, opt in, enter a fictional guardian and consent to sharing. Share the displayed demo link. The guardian signs in or registers with the matching fictional contact, then accepts with consent or declines in **Invitations**. Payers can revoke and guardians can withdraw enrollment. A new enrollment applies to new review requests.
+- **Review privacy** — A guardian receives an assigned active review reference and the redacted V2 response. A high-risk request without an accepted guardian goes to fallback. Revocation closes access to pending reviews, and final confirmation rechecks Safe-Lock and enrollment.
+- **Sessions** — The fixture issues 30-minute demo sessions per role and keeps fictional accounts, invitations and payments in memory until the local server restarts. The browser keeps each role's token in session storage and the review window preference in local storage by payer account. A read-only password example demonstrates the visibility control. Demo sign-in uses synthetic account selection.
+- **Other routes** — Help & recovery provides reporting links and a demo request reference. `/analyst` and `/admin` show integration shells.
+- **Simulation limits** — Keep the fixture local and use fictional data. Notification, quiet-hours and call controls save preferences. Delivery, contact verification, audit evidence export and identity security depend on backend integration. The existing payment interface retains four language catalogs. New account and enrollment pages use English copy.
 
 ## Phase 2 experience
 
@@ -40,7 +49,7 @@ The browser uses the documented `/api/v2` payment paths with separate synthetic 
 
 The demo saves the duration preference in the payer's browser. The client sends a demo-only `X-PauseGuard-Demo-Review-Seconds` header with the create request. The fixture validates the hint, sets `guardian_deadline` once when a review is required, and returns the effective window as a demo-only response header for the progress bar. The canonical request and response JSON remain unchanged. Both windows calculate the countdown from the same deadline. Saving another duration applies to future payments, and retries keep the original deadline.
 
-Komal should verify the fixture's guardian decision and confirmation payloads against the backend's eventual OpenAPI schema. The fixture advances the deadline on payment reads and applicable actions using server time. It models an execution state without a ledger. The browser polls active requests and refreshes on reconnect. The shared contract leaves event delivery for later integration. The client validates the response before rendering it and rejects guardian responses containing extra fields. The browser fixture tokens are public synthetic identifiers. Keep the server local.
+Komal should verify the fixture's guardian decision and confirmation payloads against the backend's eventual OpenAPI schema. The fixture advances the deadline on payment reads and applicable actions using server time. It models an execution state without a ledger. The browser polls active requests and refreshes on reconnect. The shared contract leaves event delivery for later integration. The client validates the response before rendering it and rejects guardian responses containing extra fields. The local fixture checks expiring demo session tokens and enrollment on each review request. Keep the server local.
 
 ## Checks
 
@@ -53,6 +62,12 @@ npm test
 With the demo server running and Playwright plus Chromium available, run `npm run test:browser`. Set `PLAYWRIGHT_MODULE` to the installed Playwright module path when using shared tooling. Optionally set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` for an existing Chromium binary or `PAUSEGUARD_TEST_ORIGIN` for a different local port.
 
 The browser cases cover the two-window flow and expiry at all three durations, preference persistence, refresh and reconnect during active review, mobile validation and focus, reduced motion, local fonts, warning acknowledgement, lost confirmation responses, malformed guardian payloads and blocked recipients. Fixture and client tests cover state transitions, authorization, expiry, replay, paise conversion and response validation.
+
+## Demo account adapter and backend handoff
+
+Account requests are isolated under `/__pauseguard/demo` with `POST /register`, `GET/POST/DELETE /session`, `POST /profile`, `GET/POST /enrollment`, and `GET /reviews`. The existing payment JSON and V2 state names are unchanged.
+
+Komal should define real registration, identity verification, session and account recovery, role claims, profile and preference persistence, invitation binding and acceptance, revocation, notification delivery and review discovery. Replace the demo adapter with the approved interfaces and test object-level access against the real service.
 
 ## Phase 3 integration
 

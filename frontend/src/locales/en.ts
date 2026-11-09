@@ -125,6 +125,8 @@ export const en = {
   waitingDetail: 'Your guardian can review this request before you decide whether to continue.',
   guardianPendingTitle: 'Review requested',
   guardianPendingDetail: 'Approve only after verifying the request independently. If you are unsure, reject the payment.',
+  noGuardianTitle: 'Independent review needed',
+  noGuardianDetail: 'No accepted guardian is assigned. The payment stays on hold. Verify independently or stop this payment.',
   fallbackTitle: 'Review window closed',
   fallbackDetail: 'The payment is still on hold. Verify the request independently or stop this payment.',
   guardianFallbackDetail: 'The payment remains on hold. The guardian decision window has ended.',

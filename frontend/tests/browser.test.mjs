@@ -2,13 +2,13 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
 import { demoReviewDurationHeader, reviewDurations } from '../mocks/reviewPreference.ts'
-import { demoTokens } from '../mocks/scenarios.ts'
+import { demoAccountPath } from '../src/types/account.ts'
 
 const require = createRequire(import.meta.url)
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const origin = process.env.PAUSEGUARD_TEST_ORIGIN || 'http://localhost:5173'
 
-async function setup(t, options) {
+async function setup(t, options, sample = true) {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   })
@@ -16,6 +16,10 @@ async function setup(t, options) {
   const context = await browser.newContext(options)
   const payer = await context.newPage()
   await payer.goto(origin)
+  if (sample) {
+    await payer.getByRole('button', { name: 'Open sample payer' }).click()
+    await payer.getByRole('heading', { name: 'Prepare a payment' }).waitFor()
+  }
   return { browser, payer }
 }
 
@@ -24,6 +28,7 @@ async function openReview(payer) {
     payer.waitForEvent('popup'),
     payer.getByRole('link', { name: 'Open guardian window' }).click(),
   ])
+  await guardian.getByRole('button', { name: 'Open sample guardian' }).click()
   await guardian.getByText('Waiting for a review request').waitFor()
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Waiting for your guardian' }).waitFor()
@@ -68,6 +73,7 @@ test('separate browser profiles can find a request by reference and reject it', 
   const { browser, payer } = await setup(t)
   const guardian = await (await browser.newContext()).newPage()
   await guardian.goto(`${origin}/guardian`)
+  await guardian.getByRole('button', { name: 'Open sample guardian' }).click()
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Waiting for your guardian' }).waitFor()
   const reference = await payer.locator('.reference code').innerText()
@@ -141,8 +147,9 @@ test('saved guardian review durations expire safely in both windows', { concurre
       page.getByRole('heading', { name: 'Review window closed' }).waitFor({ timeout: (seconds + 8) * 1_000 })))
     assert.equal(await guardian.getByRole('button', { name: 'Approve review' }).count(), 0)
     assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
+    const token = await payer.evaluate(() => sessionStorage.getItem('pauseguard:demo:session:payer'))
     const status = await payer.request.get(`${origin}/api/v2/payments/${payment.id}`, {
-      headers: { Authorization: `Bearer ${demoTokens.payer}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     assert.equal((await status.json()).status, 'AWAITING_FALLBACK_REVIEW')
     await payer.getByRole('button', { name: 'Stop this payment' }).click()
@@ -286,4 +293,118 @@ test('flagged demo recipient is rejected without opening a guardian request', { 
   await payer.getByText(/A safety rule stopped this request/).waitFor()
   assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
   assert.equal(await payer.evaluate(() => localStorage.getItem('pauseguard:demo:guardian-request')), null)
+})
+
+async function signUp(page, name, contact) {
+  await page.getByRole('link', { name: 'Sign up', exact: true }).click()
+  await page.getByLabel('Full name').fill(name)
+  await page.getByLabel('Email or mobile').fill(contact)
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await page.getByRole('button', { name: 'Create account' }).click()
+}
+
+test('new payer onboards on mobile, edits profile, and signs back in', { timeout: 30_000 }, async (t) => {
+  const { payer } = await setup(t, { viewport: { width: 360, height: 780 }, isMobile: true, hasTouch: true }, false)
+  await payer.getByRole('link', { name: 'Sign up', exact: true }).focus()
+  await payer.keyboard.press('Enter')
+  await payer.getByRole('button', { name: 'Continue' }).click()
+  await payer.getByRole('alert').filter({ hasText: 'fictional full name' }).waitFor()
+  assert.equal(await payer.getByLabel('Full name').evaluate((input) => input === document.activeElement), true)
+  await payer.getByLabel('Full name').fill('Mobile Demo')
+  await payer.getByLabel('Email or mobile').fill('mobile@gmail.com')
+  await payer.getByRole('button', { name: 'Continue' }).click()
+  await payer.getByRole('alert').filter({ hasText: 'fictional .test email' }).waitFor()
+  const contact = `mobile-${crypto.randomUUID()}@fixture.test`
+  await payer.getByLabel('Email or mobile').fill(contact)
+  await payer.getByRole('button', { name: 'Continue' }).click()
+  await payer.getByLabel('Account type').selectOption('small_business')
+  await payer.getByLabel('Organization (optional)').fill('Example Studio')
+  await payer.getByRole('button', { name: 'Create account' }).click()
+  await payer.getByRole('heading', { name: 'Prepare a payment' }).waitFor()
+  await payer.getByRole('link', { name: 'Profile', exact: true }).click()
+  await payer.getByLabel('Full name').fill('Edited Demo')
+  await payer.getByLabel('Recurring supplier (optional)').selectOption('supplier_new')
+  await payer.getByLabel('Quiet hours start (optional)').fill('22:00')
+  await payer.getByLabel('Quiet hours end (optional)').fill('06:00')
+  await payer.getByText('I opt in to simulated guardian call preferences').click()
+  await payer.getByText('Use larger text').click()
+  await payer.getByRole('button', { name: 'Save profile' }).click()
+  await payer.getByRole('status').filter({ hasText: 'Settings saved.' }).waitFor()
+  await payer.reload()
+  assert.equal(await payer.getByLabel('Full name').inputValue(), 'Edited Demo')
+  assert.equal(await payer.getByLabel('Recurring supplier (optional)').inputValue(), 'supplier_new')
+  assert.equal(await payer.getByLabel('I opt in to simulated guardian call preferences').isChecked(), true)
+  assert.equal(await payer.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
+  await payer.getByRole('button', { name: 'Turn on Safe-Lock' }).click()
+  await payer.getByRole('heading', { name: 'Safe-Lock is on' }).waitFor()
+  await payer.getByRole('link', { name: 'Dashboard', exact: true }).click()
+  await payer.getByRole('button', { name: 'Everyday purchase' }).click()
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await payer.getByRole('heading', { name: 'Payment rejected' }).waitFor()
+  await payer.getByRole('button', { name: 'Sign out' }).click()
+  await payer.getByRole('link', { name: 'Sign in', exact: true }).click()
+  await payer.getByText('Password interface preview').click()
+  await payer.getByRole('button', { name: 'Show example password' }).click()
+  assert.equal(await payer.getByLabel('Example password').getAttribute('readonly'), '')
+  assert.equal(await payer.getByLabel('Example password').getAttribute('type'), 'text')
+  await payer.getByLabel('Email or mobile').fill(contact)
+  await payer.getByRole('button', { name: 'Sign in to demo' }).click()
+  await payer.getByText('Signed in as Edited Demo').waitFor()
+
+  const token = await payer.evaluate(() => sessionStorage.getItem('pauseguard:demo:session:payer'))
+  await payer.request.delete(origin + demoAccountPath + '/session', { headers: { Authorization: `Bearer ${token}` } })
+  await payer.reload()
+  await payer.getByRole('alert').filter({ hasText: 'Your demo session expired' }).waitFor()
+})
+
+test('separate enrolled guardian declines, accepts, and loses access after revocation', { timeout: 35_000 }, async (t) => {
+  const { browser, payer } = await setup(t, undefined, false)
+  const suffix = crypto.randomUUID()
+  const contact = `guardian-${suffix}@fixture.test`
+  await signUp(payer, 'Invite Payer', `payer-${suffix}@fixture.test`)
+  await payer.getByRole('link', { name: 'Guardians', exact: true }).click()
+  await payer.getByText('No guardian enrolled.').waitFor()
+  async function invite() {
+    const optIn = payer.getByLabel('I want to invite a trusted guardian')
+    if (!await optIn.isChecked()) await optIn.check()
+    await payer.getByLabel('Guardian name').fill('Invite Guardian')
+    await payer.getByLabel('Relationship').selectOption('Family')
+    await payer.getByLabel('Guardian demo email or mobile').fill(contact)
+    const consent = payer.getByLabel('I consent to sharing the limited review details after this guardian accepts.')
+    await consent.uncheck()
+    await payer.getByRole('button', { name: 'Send demo invitation' }).click()
+    await payer.getByRole('alert').filter({ hasText: 'sharing consent' }).waitFor()
+    await consent.check()
+    await payer.getByRole('button', { name: 'Send demo invitation' }).click()
+    await payer.getByText('Pending', { exact: true }).waitFor()
+  }
+  await invite()
+  const guardian = await (await browser.newContext()).newPage()
+  await guardian.goto(await payer.getByLabel('Guardian invitation link').inputValue())
+  await signUp(guardian, 'Invite Guardian', contact)
+  await guardian.getByText('Pending', { exact: true }).waitFor()
+  assert.equal(await guardian.getByRole('button', { name: 'Accept invitation' }).isEnabled(), false)
+  await guardian.getByRole('button', { name: 'Decline invitation' }).click()
+  await guardian.getByText('Declined', { exact: true }).waitFor()
+  await payer.getByRole('button', { name: 'Refresh invitation status' }).click()
+  await payer.getByText('Declined', { exact: true }).waitFor()
+  await invite()
+  await guardian.getByRole('button', { name: 'Refresh invitation status' }).click()
+  await guardian.getByLabel('I agree to receive privacy-limited review requests from this payer.').check()
+  await guardian.getByRole('button', { name: 'Accept invitation' }).click()
+  await guardian.getByText('Accepted', { exact: true }).waitFor()
+  await guardian.getByRole('link', { name: 'Reviews', exact: true }).click()
+  await payer.getByRole('link', { name: 'Dashboard', exact: true }).click()
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await guardian.getByRole('button', { name: 'Open review' }).click()
+  await guardian.getByRole('heading', { name: 'Review requested' }).waitFor()
+  assert.doesNotMatch(await guardian.locator('main').innerText(), /55,000|Willow Supplies|KYC or verification request/)
+  await payer.getByRole('link', { name: 'Guardians', exact: true }).click()
+  await payer.getByRole('button', { name: 'Revoke guardian access' }).click()
+  await payer.getByText('Revoked', { exact: true }).waitFor()
+  await guardian.getByRole('heading', { name: 'Payment status unavailable' }).waitFor()
+  assert.equal(await guardian.getByRole('button', { name: 'Approve review' }).count(), 0)
+  await payer.getByRole('link', { name: 'Dashboard', exact: true }).click()
+  await payer.getByRole('heading', { name: 'Review window closed' }).waitFor()
+  assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
 })

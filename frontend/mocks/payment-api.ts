@@ -1,60 +1,23 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createDemoAccounts } from './accounts.ts'
+import { MockError, readBody, respond } from './http.ts'
+import { demoAccountPath } from '../src/types/account.ts'
 import { randomUUID } from 'node:crypto'
-import { demoTokens, beneficiaries, purposes } from './scenarios.ts'
+import { beneficiaries, purposes } from './scenarios.ts'
 import { defaultReviewDuration, demoReviewDurationHeader, parseReviewDuration } from './reviewPreference.ts'
 import type { ReviewDuration } from './reviewPreference.ts'
 import { terminalStatuses } from '../src/types/payment.ts'
 import type { CreatePayment, GuardianPayment, PayerPayment, Status } from '../src/types/payment.ts'
 
 const API = '/api/v2'
-const PAYER = 'demo-payer'
-const ASSIGNED_GUARDIAN = 'demo-guardian'
-const actors = new Map([
-  [`Bearer ${demoTokens.payer}`, { id: PAYER, role: 'payer' }],
-  [`Bearer ${demoTokens.guardian}`, { id: ASSIGNED_GUARDIAN, role: 'guardian' }],
-  ['Bearer pauseguard-demo-unassigned-guardian', { id: 'demo-other', role: 'guardian' }],
-])
-
 interface PaymentRecord {
   payment: PayerPayment
   input: CreatePayment
   payer: string
   guardian: string | null
+  enrollmentId?: string
   reviewDuration?: ReviewDuration
   confirmationKey?: string
-}
-
-class MockError extends Error {
-  constructor(readonlyStatus: number, message: string) {
-    super(message)
-    this.status = readonlyStatus
-  }
-
-  readonly status: number
-}
-
-async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  let text = ''
-  for await (const chunk of request) {
-    text += chunk
-    if (text.length > 4096) throw new MockError(413, 'The demo request is too large.')
-  }
-  try {
-    const body = JSON.parse(text)
-    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
-    return body
-  } catch {
-    throw new MockError(400, 'The demo request needs a JSON object.')
-  }
-}
-
-function respond(response: ServerResponse, now: number, status: number, body: unknown) {
-  response.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Cache-Control': 'no-store',
-    Date: new Date(now).toUTCString(),
-  })
-  response.end(JSON.stringify(body))
 }
 
 function transition(record: PaymentRecord, status: Status) {
@@ -79,7 +42,7 @@ function classify(input: CreatePayment): Pick<PayerPayment, 'status' | 'tier' | 
   if (input.purpose === 'kyc_verification') {
     const reasons = ['RC_COERCION_PURPOSE']
     if (input.beneficiary_id === 'supplier_new') reasons.unshift('RC_NEW_BENEFICIARY')
-    if (input.amount_paise >= 5_500_000) reasons.push('RC_LARGE_DEVIATION', 'RC_CUSTOMER_ALERT_PREFERENCE')
+    if (input.amount_paise >= 5_500_000) reasons.push('RC_LARGE_DEVIATION')
     return { status: 'AWAITING_GUARDIAN', tier: 3, risk_score: 100, reason_codes: reasons }
   }
   if (input.beneficiary_id === 'supplier_new') {
@@ -93,19 +56,25 @@ function validKey(value: unknown): value is string {
 }
 
 export function createMockApi(clock: () => number = Date.now) {
+  const accounts = createDemoAccounts(clock)
   const payments = new Map<string, PaymentRecord>()
   const creations = new Map<string, PaymentRecord>()
 
+  function assigned(record: PaymentRecord) {
+    return accounts.isEnrolled(record.enrollmentId, record.payer, record.guardian)
+  }
+
   function expire(record: PaymentRecord) {
     const { status, guardian_deadline } = record.payment
-    if (status === 'AWAITING_GUARDIAN' && guardian_deadline && clock() >= Date.parse(guardian_deadline)) {
+    if (status === 'AWAITING_GUARDIAN' && (!assigned(record) || (guardian_deadline && clock() >= Date.parse(guardian_deadline)))) {
       transition(record, 'AWAITING_FALLBACK_REVIEW')
     }
   }
 
   return (request: IncomingMessage, response: ServerResponse, next: () => void) => {
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname
-    if (!path.startsWith(`${API}/`)) return next()
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    const path = url.pathname
+    if (!path.startsWith(`${API}/`) && !path.startsWith(`${demoAccountPath}/`)) return next()
 
     function snapshot(record: PaymentRecord, role: string) {
       if (record.payment.status === 'AWAITING_GUARDIAN' && record.reviewDuration) {
@@ -118,12 +87,25 @@ export function createMockApi(clock: () => number = Date.now) {
       const route = path.slice(API.length)
       const method = request.method
       if (method === 'GET' && route === '/health') return { status: 'ok', mode: 'mock' }
-      const actor = actors.get(request.headers.authorization ?? '')
-      if (!actor) throw new MockError(401, 'This demo session is unauthorized.')
+      if (path.startsWith(`${demoAccountPath}/`)) {
+        const demoRoute = path.slice(demoAccountPath.length)
+        if (demoRoute !== '/reviews' || method !== 'GET') return accounts.handle(demoRoute, request)
+        const { profile } = accounts.authenticate(request.headers.authorization)
+        if (profile.role !== 'guardian') throw new MockError(403, 'Only a guardian can open review alerts.')
+        const hint = url.searchParams.get('reference')
+        const found = [...payments.values()].reverse().find((record) => {
+          if (record.guardian !== profile.id || (profile.sample && record.payment.id !== hint)) return false
+          expire(record)
+          return assigned(record) && record.payment.status === 'AWAITING_GUARDIAN'
+        })
+        return { id: found?.payment.id ?? null }
+      }
+      const { profile: actor } = accounts.authenticate(request.headers.authorization)
 
       if (method === 'POST' && route === '/payments') {
         if (actor.role !== 'payer') throw new MockError(403, 'This demo role cannot start payments.')
         const body = await readBody(request)
+        const { profile: payer } = accounts.authenticate(request.headers.authorization)
         const { beneficiary_id, purpose, amount_paise, idempotency_key } = body
         if (typeof beneficiary_id !== 'string' || !Object.hasOwn(beneficiaries, beneficiary_id) ||
             typeof purpose !== 'string' || !Object.hasOwn(purposes, purpose) ||
@@ -145,15 +127,21 @@ export function createMockApi(clock: () => number = Date.now) {
         const durationHint = request.headers[demoReviewDurationHeader]
         const requestedDuration = durationHint === undefined ? defaultReviewDuration : parseReviewDuration(durationHint)
         if (!requestedDuration) throw new MockError(422, 'Choose 30, 45, or 60 seconds for guardian review.')
-        const outcome = classify(input)
-        const reviewDuration = outcome.status === 'AWAITING_GUARDIAN' ? requestedDuration : undefined
+        const outcome = payer.safeLock ? { status: 'REJECTED', tier: 3, risk_score: 100, reason_codes: [] } as const : classify(input)
+        const enrollment = outcome.status === 'AWAITING_GUARDIAN' ? accounts.currentEnrollment(actor.id) : undefined
+        const reviewDuration = enrollment ? requestedDuration : undefined
+        const status = outcome.status === 'AWAITING_GUARDIAN' && !enrollment ? 'AWAITING_FALLBACK_REVIEW' : outcome.status
+        const reasonCodes = [...outcome.reason_codes]
+        if (status !== 'REJECTED' && payer.thresholdPaise !== null && amount_paise >= payer.thresholdPaise) {
+          reasonCodes.push('RC_CUSTOMER_ALERT_PREFERENCE')
+        }
         const payment: PayerPayment = {
-          id: `pg_${randomUUID()}`, ...outcome, beneficiary_id, amount_paise, purpose, version: 1,
+          id: `pg_${randomUUID()}`, ...outcome, status, reason_codes: reasonCodes, beneficiary_id, amount_paise, purpose, version: 1,
           guardian_deadline: reviewDuration ? new Date(clock() + reviewDuration * 1_000).toISOString() : null,
         }
         // The two synthetic accounts are pre-enrolled for this fixture only.
         const record = {
-          payment, input, payer: actor.id, guardian: reviewDuration ? ASSIGNED_GUARDIAN : null, reviewDuration,
+          payment, input, payer: actor.id, guardian: enrollment?.guardianId ?? null, enrollmentId: enrollment?.id, reviewDuration,
         }
         payments.set(payment.id, record)
         creations.set(key, record)
@@ -164,7 +152,7 @@ export function createMockApi(clock: () => number = Date.now) {
       const action = segments.join('/')
       if (resource !== 'payments' || !id) throw new MockError(404, 'This route is unavailable in the demo.')
       const record = payments.get(id)
-      if (!record || (actor.id !== record.payer && actor.id !== record.guardian)) {
+      if (!record || (actor.id !== record.payer && (actor.id !== record.guardian || !assigned(record)))) {
         throw new MockError(404, 'This payment is unavailable for this demo account.')
       }
       const { payment } = record
@@ -176,6 +164,8 @@ export function createMockApi(clock: () => number = Date.now) {
       if (action === 'guardian/decision') {
         if (actor.id !== record.guardian) throw new MockError(403, 'Only the assigned guardian can review.')
         const { decision } = await readBody(request)
+        accounts.authenticate(request.headers.authorization)
+        if (!assigned(record)) throw new MockError(404, 'This payment is unavailable for this demo account.')
         expire(record)
         if (payment.status !== 'AWAITING_GUARDIAN') {
           throw new MockError(409, 'This guardian review has closed. Refresh its status.')
@@ -187,9 +177,14 @@ export function createMockApi(clock: () => number = Date.now) {
       if (actor.id !== record.payer) throw new MockError(403, 'Only the payer can take this action.')
       if (action === 'confirm') {
         const { idempotency_key } = await readBody(request)
+        const { profile: payer } = accounts.authenticate(request.headers.authorization)
         if (!validKey(idempotency_key)) throw new MockError(422, 'A confirmation key is required.')
         if (payment.status === 'EXECUTED' && idempotency_key === record.confirmationKey) return payment
         if (payment.status !== 'READY_TO_EXECUTE') throw new MockError(409, 'This payment is unavailable for confirmation.')
+        if (payer.safeLock || (record.enrollmentId && !assigned(record))) {
+          transition(record, 'REJECTED')
+          return payment
+        }
         record.confirmationKey = idempotency_key
         transition(record, 'EXECUTED')
         return payment

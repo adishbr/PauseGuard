@@ -75,11 +75,11 @@ function Reference({ id, t }: { id: string; t: Translate }) {
   )
 }
 
-export function PaymentStatus({ role, id, locale, onClose }: {
-  role: Role; id: string; locale: Locale; onClose: () => void
+export function PaymentStatus({ role, token, id, locale, onClose }: {
+  role: Role; token: string; id: string; locale: Locale; onClose: () => void
 }) {
   const t = translator(locale)
-  const { snapshot, error, checking, accept, refresh } = usePayment(role, id)
+  const { snapshot, error, checking, accept, refresh } = usePayment(role, token, id)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<{ status: Status; key: MessageKey }>()
   const inFlight = useRef(false)
@@ -113,7 +113,7 @@ export function PaymentStatus({ role, id, locale, onClose }: {
     setBusy(true)
     setActionError(undefined)
     try {
-      accept(guardianAction ? await guardianDecision(id, action) : await payerAction(id, action))
+      accept(guardianAction ? await guardianDecision(token, id, action) : await payerAction(token, id, action))
     } catch (failure) {
       setActionError({ status, key: paymentError(failure).key })
       refresh()
@@ -129,7 +129,8 @@ export function PaymentStatus({ role, id, locale, onClose }: {
     status === 'REJECTED' || status === 'FAILED' ? 'danger' :
     status === 'CANCELLED' || status === 'EXPIRED' ? 'neutral' :
     status?.startsWith('AWAITING_') ? 'caution' : 'mint'
-  const [title, description] = status ?
+  const noGuardian = status === 'AWAITING_FALLBACK_REVIEW' && payment?.guardian_deadline === null
+  const [title, description] = noGuardian ? ['noGuardianTitle', 'noGuardianDetail'] as const : status ?
     (role === 'guardian' ? guardianLabels[status] ?? labels[status] : labels[status]) :
     ['checkingStatus', 'connecting'] as const
   const statusDetail = role === 'payer' && payment?.status === 'REJECTED' && !payment.guardian_deadline ?

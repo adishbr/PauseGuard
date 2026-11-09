@@ -5,6 +5,12 @@ import { ProtectionSettings } from './components/ProtectionSettings.tsx'
 import { Icon } from './components/Icon.tsx'
 import { isLocale, languages, translator } from './locales/messages.ts'
 import type { Locale } from './locales/messages.ts'
+import { Account } from './pages/Account.tsx'
+import { Auth } from './pages/Auth.tsx'
+import { Enrollment } from './pages/Enrollment.tsx'
+import { Help } from './pages/Help.tsx'
+import { accountApi, AccountError, savedSession, saveSession, sessionExpired } from './services/accountApi.ts'
+import type { DemoProfile, DemoSession } from './types/account.ts'
 import { Guardian } from './pages/Guardian.tsx'
 import { Payer } from './pages/Payer.tsx'
 import { storageRead, storageWrite } from './services/demoSession.ts'
@@ -13,32 +19,138 @@ import './App.css'
 const languageKey = 'pauseguard:demo:language'
 const protectionKey = 'pauseguard:demo:review-seconds'
 
+function dashboardDestination(dashboard: string) {
+  return dashboard === '/guardian' && new URLSearchParams(window.location.search).get('next') === '/guardian/enrollment' ?
+    '/guardian/enrollment' : dashboard
+}
+
 function App() {
-  const guardian = window.location.pathname.replace(/\/$/, '') === '/guardian'
+  const [path, setPath] = useState(() => window.location.pathname.replace(/\/$/, '') || '/')
+  const guardian = path === '/guardian' || path.startsWith('/guardian/')
+  const role = guardian ? 'guardian' : 'payer'
+  const base = guardian ? '/guardian' : ''
+  const dashboard = base || '/'
+  const shell = path === '/analyst' || path === '/admin'
+  const [token, setToken] = useState(() => shell ? '' : savedSession(role))
+  const [session, setSession] = useState<DemoSession>()
+  const [expired, setExpired] = useState(false)
+  const [sessionError, setSessionError] = useState('')
+  const [retry, setRetry] = useState(0)
+  const [signingOut, setSigningOut] = useState(false)
   const [locale, setLocale] = useState<Locale>(() => {
     const saved = storageRead('localStorage', languageKey)
     return isLocale(saved) ? saved : 'en'
   })
-  const [reviewDuration, setReviewDuration] = useState(() =>
-    parseReviewDuration(storageRead('localStorage', protectionKey)) ?? defaultReviewDuration)
+  const [savedDuration, setSavedDuration] = useState<{ key: string; value: ReviewDuration }>()
   const t = translator(locale)
+  const profile = session?.profile
+  const durationKey = `${protectionKey}:${profile?.id}`
+  const reviewDuration = savedDuration?.key === durationKey ? savedDuration.value :
+    parseReviewDuration(storageRead('localStorage', durationKey) ||
+      (profile?.sample ? storageRead('localStorage', protectionKey) : '')) ?? defaultReviewDuration
+  const paymentPage = path === dashboard
+  const showProtection = !guardian && (paymentPage || path === '/profile')
+
+  function changeLocale(next: Locale) {
+    storageWrite('localStorage', languageKey, next)
+    setLocale(next)
+  }
 
   function saveReviewDuration(duration: ReviewDuration) {
-    if (!storageWrite('localStorage', protectionKey, String(duration))) return false
-    setReviewDuration(duration)
+    if (!storageWrite('localStorage', durationKey, String(duration))) return false
+    setSavedDuration({ key: durationKey, value: duration })
     return true
   }
+
+  function enter(next: DemoSession) {
+    saveSession(role, next.token)
+    setSession(next)
+    setToken(next.token)
+    setExpired(false)
+    setSessionError('')
+    if (!next.profile.sample) changeLocale(next.profile.language)
+    const target = path.endsWith('/login') || path.endsWith('/signup') ? dashboardDestination(dashboard) : path
+    window.history.replaceState(null, '', target)
+    setPath(target)
+  }
+
+  function saveProfile(next: DemoProfile) {
+    setSession((previous) => previous && { ...previous, profile: next })
+    changeLocale(next.language)
+  }
+
+  async function logout() {
+    if (!token || signingOut) return
+    setSigningOut(true)
+    try {
+      await accountApi.logout(token)
+      saveSession(role, '')
+      setToken('')
+      setSession(undefined)
+      setSessionError('')
+      setExpired(false)
+      window.history.replaceState(null, '', dashboard)
+      setPath(dashboard)
+    } catch (error) {
+      if (!(error instanceof AccountError && error.status === 401)) setSessionError('Sign-out could not reach the demo service. Try again.')
+    } finally {
+      setSigningOut(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!token) return
+    let active = true
+
+    function expire() {
+      if (!active) return
+      saveSession(role, '')
+      setToken('')
+      setSession(undefined)
+      setExpired(true)
+      setSessionError('')
+    }
+
+    function onExpiry(event: Event) {
+      if ((event as CustomEvent<string>).detail === token) expire()
+    }
+
+    let timer: ReturnType<typeof setTimeout>
+    window.addEventListener(sessionExpired, onExpiry)
+    void accountApi.session(token).then((next) => {
+      if (!active) return
+      if (next.profile.role !== role) { expire(); return }
+      setSession(next)
+      setSessionError('')
+      if (window.location.pathname.endsWith('/login') || window.location.pathname.endsWith('/signup')) {
+        const target = dashboardDestination(dashboard)
+        window.history.replaceState(null, '', target)
+        setPath(target)
+      }
+      timer = setTimeout(expire, Math.max(0, next.expiresAt - Date.now()))
+    }, (error: unknown) => {
+      if (!active) return
+      if (error instanceof AccountError && error.status === 401) expire()
+      else setSessionError('Could not check your demo session. Retry when connected.')
+    })
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+      window.removeEventListener(sessionExpired, onExpiry)
+    }
+  }, [token, role, retry, dashboard])
 
   useEffect(() => {
     document.documentElement.lang = locale
   }, [locale])
 
   return (
-    <>
+    <div className={profile?.largeText ? 'app large-text' : 'app'}>
       <a className="skip-link" href="#main">{t('skip')}</a>
       <header className="site-header">
         <div className="frame topbar">
-          <a href="/" className="brand" aria-label={t('payerHome')}>
+          <a href={dashboard} className="brand" aria-label={guardian ? 'PauseGuard guardian home' : t('payerHome')}>
             <span className="brand-mark"><Icon name="shield" /></span>
             <span>Pause<span>Guard</span></span>
           </a>
@@ -49,8 +161,7 @@ function App() {
               <select value={locale} onChange={(event) => {
                 const next = event.target.value
                 if (!isLocale(next)) return
-                storageWrite('localStorage', languageKey, next)
-                setLocale(next)
+                changeLocale(next)
               }}>
                 {Object.entries(languages).map(([code, language]) => (
                   <option key={code} value={code} lang={code}>{language.label}</option>
@@ -59,25 +170,48 @@ function App() {
             </label>
           </div>
         </div>
+        {profile && <nav className="frame account-nav" aria-label="Account navigation">
+          <a href={dashboard} aria-current={paymentPage ? 'page' : undefined}>{guardian ? 'Reviews' : 'Dashboard'}</a>
+          <a href={`${base}/profile`} aria-current={path.endsWith('/profile') ? 'page' : undefined}>Profile</a>
+          <a href={`${base}/enrollment`} aria-current={path.endsWith('/enrollment') ? 'page' : undefined}>{guardian ? 'Invitations' : 'Guardians'}</a>
+          <a href={`${base}/help`} aria-current={path.endsWith('/help') ? 'page' : undefined}>Help & recovery</a>
+          <button className="text-button" disabled={signingOut} type="button" onClick={() => void logout()}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
+        </nav>}
       </header>
 
       <main id="main" className="frame" tabIndex={-1}>
-        <div className="intro">
+        {sessionError && <div className="notice" role="alert">
+          <p>{sessionError}</p>
+          {!session && <button className="secondary" type="button" onClick={() => { setSessionError(''); setRetry((n) => n + 1) }}>Retry session</button>}
+        </div>}
+        {shell ? <section className="card account-card workspace-card">
+          <p className="eyebrow">Integration shell</p>
+          <h1>{path === '/analyst' ? 'Analyst interface' : 'Admin interface'}</h1>
+          <p className="form-note">Access and data will come from the team’s authorized backend. The local demo supports payer and guardian sessions.</p>
+          <a className="secondary" href="/">Return to PauseGuard</a>
+        </section> : !session ? token ? (
+          !sessionError && <p className="form-note" role="status">Checking your demo session…</p>
+        ) : <Auth key={path} path={path} role={role} locale={locale} onSession={enter} expired={expired} /> : <>
+        {paymentPage && <div className="intro">
           <div className="intro-copy">
             <p className="eyebrow"><span className="line" />{t(guardian ? 'guardianEyebrow' : 'payerEyebrow')}</p>
             <h1>{t(guardian ? 'guardianHero' : 'payerHero')} <em>{t(guardian ? 'guardianAccent' : 'payerAccent')}</em></h1>
             <p>{t(guardian ? 'guardianIntro' : 'payerIntro')}</p>
           </div>
           <div className="intro-mark" aria-hidden="true"><Icon name="shield" size={53} /></div>
-        </div>
+        </div>}
 
-        <div className="workspace">
+        <div className={paymentPage ? 'workspace' : 'workspace account-workspace'}>
           <div className="main-column">
-            {!guardian && <a className="mobile-settings-link" href="#payment-protection-settings">{t('protectionSettings')} <Icon name="arrow" size={16} /></a>}
-            {guardian ? <Guardian locale={locale} /> : <Payer locale={locale} reviewDuration={reviewDuration} />}
+            {showProtection && <a className="mobile-settings-link" href="#payment-protection-settings">{t('protectionSettings')} <Icon name="arrow" size={16} /></a>}
+            {path.endsWith('/profile') ? <Account key={session.profile.id} token={token} profile={session.profile} saved={saveProfile} /> :
+              path.endsWith('/enrollment') ? <Enrollment key={session.profile.id} token={token} profile={session.profile} /> :
+              path.endsWith('/help') ? <Help payerId={guardian ? undefined : session.profile.id} /> :
+              guardian ? <Guardian key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} /> :
+              <Payer key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} reviewDuration={reviewDuration} />}
           </div>
           <aside className="side-column" aria-label={t('about')}>
-            {!guardian && <ProtectionSettings saved={reviewDuration} save={saveReviewDuration} t={t} />}
+            {showProtection && <ProtectionSettings key={session.profile.id} saved={reviewDuration} save={saveReviewDuration} t={t} />}
             <section className="card side-card">
               <div className="symbol mint"><Icon name="users" /></div>
               <h2>{t('twoWindows')}</h2>
@@ -89,17 +223,19 @@ function App() {
             <section className="card side-card privacy-card">
               <div className="symbol"><Icon name="lock" /></div>
               <h2>{t('privacy')}</h2>
-              <p>{t('privacyNote')}</p>
+              <p>{session.profile.sample ? t('privacyNote') : 'Guardian enrollment requires explicit acceptance. Payment details stay with the payer.'}</p>
+              <p className="field-help">Signed in as {session.profile.name} · {guardian ? 'Guardian' : 'Payer'} demo</p>
             </section>
           </aside>
         </div>
+        </>}
       </main>
 
       <footer className="frame site-footer">
         <span><Icon name="shield" size={16} /> PauseGuard V2</span>
         <span>{t('footer')}</span>
       </footer>
-    </>
+    </div>
   )
 }
 

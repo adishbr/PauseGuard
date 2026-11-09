@@ -166,3 +166,49 @@ input::placeholder { color: #9aadad; }
 @media (max-width: 48rem) {
   .mobile-settings-link { display: inline-flex; align-items: center; gap: .45rem; min-height: var(--control-height); margin-bottom: .45rem; color: var(--mint); font-weight: 650; }
 }
+
+.account-nav { display: flex; align-items: center; gap: .25rem .6rem; flex-wrap: wrap; padding-block: .25rem .55rem; }
+.account-nav a, .account-nav button { display: inline-flex; min-height: var(--control-height); align-items: center; padding: .45rem .7rem; color: var(--muted); border-radius: .55rem; }
+.account-nav [aria-current='page'] { color: #e4fbf2; background: #1b3732; }
+.account-nav a:hover { color: var(--mint); }
+.account-nav button { margin-inline-start: auto; }
+.account-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: clamp(1rem, 5vw, 4rem); padding-block: clamp(1.6rem, 5vw, 4.2rem); }
+.account-intro { padding: clamp(.2rem, 3vw, 2.4rem) 0; }
+.account-intro .eyebrow { margin-top: 1rem; }
+.account-intro h1 { margin: .65rem 0; font-size: clamp(2.25rem, 6vw, 4.15rem); line-height: 1.1; letter-spacing: -.06em; font-weight: 780; }
+.account-intro > p:not(.eyebrow) { color: var(--muted); font-size: 1.12rem; line-height: 1.65; }
+.account-intro a { margin-top: .75rem; }
+.account-card { padding: clamp(1rem, 3vw, 1.8rem); }
+.account-workspace { padding-top: clamp(1rem, 4vw, 2.5rem); }
+.account-card h2 { font-size: clamp(1.55rem, 4vw, 2.2rem); }
+.account-card > p { margin-block: .55rem .8rem; }
+.account-form, .account-form fieldset { display: grid; gap: .8rem; min-width: 0; }
+.account-form fieldset[hidden] { display: none; }
+.account-form { margin-top: 1.15rem; }
+.account-form .actions { margin-top: .2rem; }
+.account-form fieldset + fieldset { border-top: 1px solid var(--border); padding-top: .45rem; }
+.account-form legend, .account-card h3 { font-size: 1.04rem; font-weight: 730; }
+.account-form legend { padding-bottom: .35rem; }
+.account-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.account-step { color: var(--mint); font-size: .86rem; font-weight: 650; }
+.sample-access, .safety-setting { border-top: 1px solid var(--border); padding-top: .9rem; margin-top: 1rem; }
+.sample-access p, .safety-setting p { margin-block: .55rem; }
+.safety-setting h3 { display: flex; gap: .45rem; align-items: center; }
+.check-row { display: flex; align-items: center; gap: .6rem; min-height: var(--control-height); }
+.check-row input { width: 1.25rem; min-height: 1.25rem; margin: 0 .25rem 0 0; flex: none; accent-color: var(--mint); }
+.enrollment-list { display: grid; gap: .8rem; margin-block: .8rem; }
+.enrollment-item { display: grid; gap: .65rem; border: 1px solid var(--border); border-radius: .7rem; padding: .85rem; background: var(--surface-inset); }
+.enrollment-item > button { justify-self: start; }
+.enrollment-title { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .45rem; align-items: center; }
+.invite-link p { color: var(--muted); margin-bottom: .45rem; }
+.large-text p, .large-text label, .large-text button, .large-text .account-nav a { font-size: 1.12rem; }
+
+@media (max-width: 48rem) {
+  .account-layout { grid-template-columns: minmax(0, 1fr); }
+  .account-nav button { margin-inline-start: 0; }
+}
+@media (max-width: 32rem) {
+  .account-fields { grid-template-columns: minmax(0, 1fr); }
+  .account-nav { gap: .15rem; }
+  .account-nav a, .account-nav button { padding-inline: .4rem; }
+}

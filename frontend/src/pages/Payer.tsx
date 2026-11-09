@@ -16,8 +16,8 @@ import type { CreatePayment } from '../types/payment.ts'
 const defaultScenario = scenarios[2]
 type DemoPaymentDraft = CreatePayment & { reviewDuration: ReviewDuration }
 
-function restoredDraft(): DemoPaymentDraft | undefined {
-  const draft = savedDraft()
+function restoredDraft(accountId: string): DemoPaymentDraft | undefined {
+  const draft = savedDraft(accountId)
   if (!draft) return undefined
   try {
     const parsed = JSON.parse(draft) as Partial<DemoPaymentDraft>
@@ -38,11 +38,11 @@ function restoredDraft(): DemoPaymentDraft | undefined {
   }
 }
 
-function PaymentForm({ locale, onCreated, focusHeading, reviewDuration }: {
-  locale: Locale; onCreated: (id: string) => void; focusHeading: boolean; reviewDuration: ReviewDuration
+function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountId, token }: {
+  locale: Locale; onCreated: (id: string) => void; focusHeading: boolean; reviewDuration: ReviewDuration; accountId: string; token: string
 }) {
   const t = translator(locale)
-  const [pending, setPending] = useState(restoredDraft)
+  const [pending, setPending] = useState(() => restoredDraft(accountId))
   const [beneficiary, setBeneficiary] = useState<string>(pending?.beneficiary_id ?? defaultScenario.beneficiary)
   const [amount, setAmount] = useState(pending ? decimalRupees(pending.amount_paise) : defaultScenario.amount)
   const [purpose, setPurpose] = useState<string>(pending?.purpose ?? defaultScenario.purpose)
@@ -81,20 +81,20 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration }: {
     setBusy(true)
     setError(undefined)
     setPending(draft)
-    saveDraft(JSON.stringify(draft))
+    saveDraft(accountId, JSON.stringify(draft))
     const { reviewDuration: requestedDuration, ...input } = draft
     try {
-      const { payment } = await createPayment(input, requestedDuration)
+      const { payment } = await createPayment(token, input, requestedDuration)
       if (payment.guardian_deadline && payment.status === 'AWAITING_GUARDIAN') {
         storageWrite('localStorage', reviewKey, payment.id)
       }
       onCreated(payment.id)
-      saveDraft('')
+      saveDraft(accountId, '')
     } catch (failure) {
       const problem = paymentError(failure)
       if ([400, 413, 422].includes(problem.status)) {
         setPending(undefined)
-        saveDraft('')
+        saveDraft(accountId, '')
       }
       setError(problem.key)
     } finally {
@@ -180,19 +180,19 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration }: {
   )
 }
 
-export function Payer({ locale, reviewDuration }: { locale: Locale; reviewDuration: ReviewDuration }) {
+export function Payer({ locale, reviewDuration, accountId, token }: { locale: Locale; reviewDuration: ReviewDuration; accountId: string; token: string }) {
   const [id, setId] = useState(() => {
-    const previous = storageRead('sessionStorage', payerKey)
+    const previous = storageRead('sessionStorage', `${payerKey}:${accountId}`)
     return isReference(previous) ? previous : ''
   })
   const [returning, setReturning] = useState(false)
 
   function selectPayment(next: string) {
-    storageWrite('sessionStorage', payerKey, next)
+    storageWrite('sessionStorage', `${payerKey}:${accountId}`, next)
     setReturning(!next)
     setId(next)
   }
 
-  return id ? <PaymentStatus key={id} role="payer" id={id} locale={locale} onClose={() => selectPayment('')} /> :
-    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} reviewDuration={reviewDuration} />
+  return id ? <PaymentStatus key={id} role="payer" token={token} id={id} locale={locale} onClose={() => selectPayment('')} /> :
+    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} reviewDuration={reviewDuration} accountId={accountId} token={token} />
 }

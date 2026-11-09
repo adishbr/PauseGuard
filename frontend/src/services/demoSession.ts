@@ -25,12 +25,12 @@ export function isReference(value: string) {
   return /^pg_[a-zA-Z0-9_-]{1,80}$/.test(value)
 }
 
-export function savedDraft() {
-  return storageRead('sessionStorage', draftKey)
+export function savedDraft(accountId: string) {
+  return storageRead('sessionStorage', `${draftKey}:${accountId}`)
 }
 
-export function saveDraft(value: string) {
-  storageWrite('sessionStorage', draftKey, value)
+export function saveDraft(accountId: string, value: string) {
+  storageWrite('sessionStorage', `${draftKey}:${accountId}`, value)
 }
 
 export function toPaise(value: string) {

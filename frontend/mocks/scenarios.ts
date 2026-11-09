@@ -1,8 +1,3 @@
-export const demoTokens = {
-  payer: 'pauseguard-demo-payer',
-  guardian: 'pauseguard-demo-guardian',
-} as const
-
 export const beneficiaries = {
   merchant_familiar: 'Cedar Café',
   supplier_new: 'Willow Supplies',

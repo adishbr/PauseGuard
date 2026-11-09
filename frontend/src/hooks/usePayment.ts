@@ -6,7 +6,7 @@ import type { Role } from '../types/payment.ts'
 type Snapshot = Awaited<ReturnType<typeof getPayment>>
 const pollMs = 1_000
 
-export function usePayment(role: Role, id: string) {
+export function usePayment(role: Role, token: string, id: string) {
   const [snapshot, setSnapshot] = useState<Snapshot>()
   const [error, setError] = useState<ApiError>()
   const [checking, setChecking] = useState(true)
@@ -48,7 +48,7 @@ export function usePayment(role: Role, id: string) {
       const started = generation.current
       let retryRead = true
       try {
-        const next = await getPayment(role, id, controller.signal)
+        const next = await getPayment(role, token, id, controller.signal)
         if (active && !controller.signal.aborted && generation.current === started) accept(next)
         failures = 0
       } catch (failure) {
@@ -98,7 +98,7 @@ export function usePayment(role: Role, id: string) {
       window.removeEventListener('offline', offline)
       window.removeEventListener('focus', reconnect)
     }
-  }, [accept, refresh, role, id, retry])
+  }, [accept, refresh, role, token, id, retry])
 
   return { snapshot, error, checking, accept, refresh }
 }

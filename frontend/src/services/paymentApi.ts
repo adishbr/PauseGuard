@@ -1,6 +1,6 @@
 import { demoReviewDurationHeader, parseReviewDuration } from '../../mocks/reviewPreference.ts'
 import type { ReviewDuration } from '../../mocks/reviewPreference.ts'
-import { demoTokens } from '../../mocks/scenarios.ts'
+import { sessionExpired } from './accountApi.ts'
 import type { MessageKey } from '../locales/en.ts'
 import type { Role } from '../types/payment.ts'
 import type { CreatePayment, GuardianPayment, PayerPayment } from '../types/payment.ts'
@@ -29,7 +29,7 @@ function httpError(status: number) {
   return new ApiError('requestFailed', status)
 }
 
-async function request<R extends Role>(role: R, path: string, options: {
+async function request<R extends Role>(role: R, token: string, path: string, options: {
   body?: object
   id?: string
   signal?: AbortSignal
@@ -39,7 +39,7 @@ async function request<R extends Role>(role: R, path: string, options: {
   const timeout = AbortSignal.timeout(5_000)
   const startedAt = Date.now()
   try {
-    const headers = new Headers({ Authorization: `Bearer ${demoTokens[role]}` })
+    const headers = new Headers({ Authorization: `Bearer ${token}` })
     if (body) headers.set('Content-Type', 'application/json')
     if (demoReviewDuration) headers.set(demoReviewDurationHeader, String(demoReviewDuration))
     const response = await fetch(`/api/v2${path}`, {
@@ -49,6 +49,7 @@ async function request<R extends Role>(role: R, path: string, options: {
       cache: 'no-store',
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     })
+    if (response.status === 401) window.dispatchEvent(new CustomEvent(sessionExpired, { detail: token }))
     if (!response.ok) throw httpError(response.status)
 
     // HTTP Date has second precision. The midpoint limits skew from request latency.
@@ -69,12 +70,12 @@ async function request<R extends Role>(role: R, path: string, options: {
 
 const paymentPath = (id: string) => `/payments/${encodeURIComponent(id)}`
 
-export const createPayment = (input: CreatePayment, demoReviewDuration: ReviewDuration) =>
-  request('payer', '/payments', { body: input, demoReviewDuration })
-export const getPayment = (role: Role, id: string, signal: AbortSignal) => request(role, paymentPath(id), { id, signal })
-export const payerAction = (id: string, action: 'warning/acknowledge' | 'cancel' | 'confirm') =>
-  request('payer', `${paymentPath(id)}/${action}`, {
+export const createPayment = (token: string, input: CreatePayment, demoReviewDuration: ReviewDuration) =>
+  request('payer', token, '/payments', { body: input, demoReviewDuration })
+export const getPayment = (role: Role, token: string, id: string, signal: AbortSignal) => request(role, token, paymentPath(id), { id, signal })
+export const payerAction = (token: string, id: string, action: 'warning/acknowledge' | 'cancel' | 'confirm') =>
+  request('payer', token, `${paymentPath(id)}/${action}`, {
     id, body: action === 'confirm' ? { idempotency_key: `confirm:${id}` } : {},
   })
-export const guardianDecision = (id: string, decision: 'approve' | 'reject') =>
-  request('guardian', `${paymentPath(id)}/guardian/decision`, { id, body: { decision } })
+export const guardianDecision = (token: string, id: string, decision: 'approve' | 'reject') =>
+  request('guardian', token, `${paymentPath(id)}/guardian/decision`, { id, body: { decision } })

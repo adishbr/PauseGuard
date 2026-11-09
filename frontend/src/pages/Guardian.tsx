@@ -4,15 +4,17 @@ import { Icon } from '../components/Icon.tsx'
 import { PaymentStatus } from '../components/PaymentStatus.tsx'
 import { translator } from '../locales/messages.ts'
 import type { Locale } from '../locales/messages.ts'
+import { accountApi } from '../services/accountApi.ts'
 import { isReference, reviewKey, storageRead, storageWrite } from '../services/demoSession.ts'
 
 const guardianKey = 'pauseguard:demo:guardian-payment'
 
-export function Guardian({ locale }: { locale: Locale }) {
+export function Guardian({ locale, token, accountId }: { locale: Locale; token: string; accountId: string }) {
   const t = translator(locale)
-  const [latest, setLatest] = useState(() => storageRead('localStorage', reviewKey))
+  const [latest, setLatest] = useState('')
+  const [inboxError, setInboxError] = useState(false)
   const [id, setId] = useState(() => {
-    const previous = storageRead('sessionStorage', guardianKey)
+    const previous = storageRead('sessionStorage', `${guardianKey}:${accountId}`)
     return isReference(previous) ? previous : ''
   })
   const [reference, setReference] = useState('')
@@ -22,26 +24,38 @@ export function Guardian({ locale }: { locale: Locale }) {
   const heading = useRef<HTMLHeadingElement>(null)
 
   useEffect(() => {
-    function readLatest() {
-      setLatest(storageRead('localStorage', reviewKey))
+    if (id) return
+    let active = true
+    let reading = false
+    async function readLatest() {
+      if (!active || reading) return
+      reading = true
+      try {
+        const result = await accountApi.review(token, storageRead('localStorage', reviewKey))
+        if (active) {
+          setLatest(result.id ?? '')
+          setInboxError(false)
+        }
+      } catch {
+        if (active) {
+          setLatest('')
+          setInboxError(true)
+        }
+      } finally {
+        reading = false
+      }
     }
-    function onStorage(event: StorageEvent) {
-      if (event.key === reviewKey || event.key === null) readLatest()
-    }
-    window.addEventListener('storage', onStorage)
-    window.addEventListener('focus', readLatest)
-    return () => {
-      window.removeEventListener('storage', onStorage)
-      window.removeEventListener('focus', readLatest)
-    }
-  }, [])
+    void readLatest()
+    const interval = setInterval(() => void readLatest(), 1_000)
+    return () => { active = false; clearInterval(interval) }
+  }, [id, token])
 
   useEffect(() => {
     if (returning && !id) heading.current?.focus()
   }, [id, returning])
 
   function openRequest(next: string) {
-    storageWrite('sessionStorage', guardianKey, next)
+    storageWrite('sessionStorage', `${guardianKey}:${accountId}`, next)
     setReturning(!next)
     setId(next)
     setInvalidReference(false)
@@ -58,7 +72,7 @@ export function Guardian({ locale }: { locale: Locale }) {
   }
 
   if (id) {
-    return <PaymentStatus key={id} id={id} role="guardian" locale={locale} onClose={() => openRequest('')} />
+    return <PaymentStatus key={id} id={id} role="guardian" token={token} locale={locale} onClose={() => openRequest('')} />
   }
 
   const hasReview = isReference(latest)
@@ -74,7 +88,7 @@ export function Guardian({ locale }: { locale: Locale }) {
       <div className={hasReview ? 'inbox inbox-active' : 'inbox'}>
         <Icon name={hasReview ? 'activity' : 'shield'} />
         <div role="status">
-          <strong>{t(hasReview ? 'reviewReceived' : 'waitingRequest')}</strong>
+          <strong>{inboxError ? 'Review alerts unavailable. Reconnecting…' : t(hasReview ? 'reviewReceived' : 'waitingRequest')}</strong>
           <p>{t(hasReview ? 'latestRequest' : 'sameBrowser')}</p>
         </div>
         {hasReview && <button type="button" className="primary" onClick={() => openRequest(latest)}>{t('openReview')} <Icon name="arrow" size={18} /></button>}
