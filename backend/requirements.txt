@@ -1,0 +1,19 @@
+# Python 3.12; exact installed versions for the offline foundation.
+# Runtime dependencies and their transitive dependencies; no optional extras.
+fastapi==0.162.2
+starlette==1.10.0
+pydantic==2.14.3
+pydantic_core==2.50.4
+annotated-types==0.8.0
+annotated-doc==0.0.5
+typing_extensions==4.16.0
+typing-inspection==0.4.5
+opentelemetry-api==1.45.2
+anyio==4.16.0
+idna==3.20
+SQLAlchemy==2.1.8
+psycopg2-binary==2.9.13
+uvicorn==0.54.0
+click==8.5.1
+h11==0.16.0
+colorama==0.4.6; sys_platform == "win32"
