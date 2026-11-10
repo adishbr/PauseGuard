@@ -1,1 +1,1 @@
-"""Persistence infrastructure only; no domain tables are registered."""
+"""Persistence mappings are registered explicitly through app.models.metadata."""

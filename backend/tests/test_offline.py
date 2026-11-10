@@ -56,6 +56,8 @@ try:
     from app.models.database import Base
     assert app.state.session_factory is None
     assert not Base.metadata.tables
+    from app.models.metadata import metadata
+    assert set(metadata.tables) == {'users', 'role_bindings', 'accounts', 'safe_lock_states'}
     assert set(app.openapi()['paths']) == {'/api/v2/health'}
     print('guarded cold import passed')
 finally:
