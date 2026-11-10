@@ -64,9 +64,13 @@ finally:
     cleanup()
 """
     # Forward only OS essentials, never database credentials or other settings.
-    environment = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR") if key in os.environ}
+    # Do not use -I (isolated mode) as it hides site-packages where pytest resides.
+    # The subprocess installs offline guards explicitly via install_guards().
+    # Pass a minimal but functional environment including USERPROFILE for user site-packages.
+    allowed_env = {"SYSTEMROOT", "WINDIR", "USERPROFILE", "HOMEPATH", "HOMEDRIVE", "APPDATA", "LOCALAPPDATA"}
+    environment = {key: os.environ[key] for key in allowed_env if key in os.environ}
     result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script, str(backend)],
+        [sys.executable, "-B", "-c", script, str(backend)],
         env=environment, capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, "Guarded cold import failed."
