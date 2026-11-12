@@ -1,3 +1,4 @@
+
 """Privacy-minimizing evidence export for PauseGuard."""
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ ALLOWED_FIELDS = {
     "policy_version",
 }
 
-# Sensitive values must never be exported.
+# Sensitive values must never be exported as separate fields.
 FORBIDDEN_FIELDS = {
     "otp",
     "pin",
@@ -44,6 +45,7 @@ FORBIDDEN_FIELDS = {
 def _clean_text(value: str) -> str:
     """Mask common personal identifiers in text."""
 
+    # Mask email addresses first.
     value = re.sub(
         r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         "[REDACTED_EMAIL]",
@@ -51,12 +53,26 @@ def _clean_text(value: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # Mask Indian mobile numbers:
+    # 9876543210
+    # 98765 43210
+    # +91 9876543210
+    # +91-9876543210
+    # +919876543210
     value = re.sub(
-        r"\b\d{10}\b",
+        r"(?<!\w)(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}(?!\w)",
         "[REDACTED_PHONE]",
         value,
     )
 
+    # Mask other exactly 10-digit phone-like numbers.
+    value = re.sub(
+        r"(?<!\d)\d{10}(?!\d)",
+        "[REDACTED_PHONE]",
+        value,
+    )
+
+    # Mask common UPI-like identifiers.
     value = re.sub(
         r"\b[\w.-]+@[\w.-]+\b",
         "[REDACTED_UPI_ID]",

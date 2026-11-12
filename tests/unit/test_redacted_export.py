@@ -24,25 +24,19 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         self.assertNotIn("unknown_field", result)
 
     def test_phone_number_is_redacted(self):
-        record = {
+        result = export_redacted_evidence({
             "case_id": "CASE-002",
-            "event_type": "REVIEW",
             "risk_indicators": ["Contact 9876543210"],
-        }
-
-        result = export_redacted_evidence(record)
+        })
 
         self.assertNotIn("9876543210", str(result))
         self.assertIn("[REDACTED_PHONE]", str(result))
 
     def test_email_is_redacted(self):
-        record = {
+        result = export_redacted_evidence({
             "case_id": "CASE-003",
-            "event_type": "REVIEW",
             "risk_indicators": ["Contact user@example.com"],
-        }
-
-        result = export_redacted_evidence(record)
+        })
 
         self.assertNotIn("user@example.com", str(result))
         self.assertIn("[REDACTED_EMAIL]", str(result))
@@ -73,16 +67,13 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         self.assertNotIn("secret", str(result))
 
     def test_nested_objects_are_not_exported(self):
-        record = {
+        result = export_redacted_evidence({
             "case_id": "CASE-005",
-            "event_type": "REVIEW",
             "risk_indicators": [
                 "unusual activity",
                 {"phone": "9876543210"},
             ],
-        }
-
-        result = export_redacted_evidence(record)
+        })
 
         self.assertEqual(
             result["risk_indicators"],
@@ -95,16 +86,12 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         })
 
         self.assertTrue(result["redaction_applied"])
-        self.assertTrue(
-            result["review_required_before_sharing"]
-        )
+        self.assertTrue(result["review_required_before_sharing"])
         self.assertIn("exported_at", result)
 
     def test_invalid_input_is_rejected(self):
         with self.assertRaises(TypeError):
             export_redacted_evidence("not a dictionary")
-
-    # Additional negative and edge-case tests
 
     def test_all_allowed_fields_can_be_exported(self):
         record = {
@@ -161,12 +148,10 @@ class TestRedactedEvidenceExport(unittest.TestCase):
             self.assertNotIn(field, result)
 
     def test_upi_id_is_redacted_in_text(self):
-        record = {
+        result = export_redacted_evidence({
             "case_id": "CASE-009",
             "risk_indicators": ["Payment made to user@bank"],
-        }
-
-        result = export_redacted_evidence(record)
+        })
 
         self.assertNotIn("user@bank", str(result))
         self.assertIn("[REDACTED_UPI_ID]", str(result))
@@ -184,7 +169,7 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         self.assertEqual(len(result["risk_indicators"]), 20)
 
     def test_non_string_list_items_are_filtered(self):
-        record = {
+        result = export_redacted_evidence({
             "risk_indicators": [
                 "valid indicator",
                 123,
@@ -193,9 +178,7 @@ class TestRedactedEvidenceExport(unittest.TestCase):
                 {"private": "data"},
                 ["nested"],
             ],
-        }
-
-        result = export_redacted_evidence(record)
+        })
 
         self.assertEqual(
             result["risk_indicators"],
@@ -254,10 +237,7 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         result = export_redacted_evidence({})
 
         self.assertIs(result["redaction_applied"], True)
-        self.assertIs(
-            result["review_required_before_sharing"],
-            True,
-        )
+        self.assertIs(result["review_required_before_sharing"], True)
 
     def test_export_does_not_modify_original_record(self):
         record = {
@@ -275,6 +255,38 @@ class TestRedactedEvidenceExport(unittest.TestCase):
         export_redacted_evidence(record)
 
         self.assertEqual(record, original)
+
+    # Additional phone-format privacy tests
+
+    def test_indian_phone_with_country_code_is_redacted(self):
+        for phone in ("+91 9876543210", "+91-9876543210"):
+            with self.subTest(phone=phone):
+                result = export_redacted_evidence({
+                    "risk_indicators": [f"Contact {phone}"],
+                })
+
+                self.assertNotIn(phone, str(result))
+                self.assertIn("[REDACTED_PHONE]", str(result))
+
+    def test_indian_phone_with_internal_space_is_redacted(self):
+        phone = "98765 43210"
+
+        result = export_redacted_evidence({
+            "risk_indicators": [f"Contact {phone}"],
+        })
+
+        self.assertNotIn(phone, str(result))
+        self.assertIn("[REDACTED_PHONE]", str(result))
+
+    def test_phone_with_country_code_without_separator_is_redacted(self):
+        phone = "+919876543210"
+
+        result = export_redacted_evidence({
+            "risk_indicators": [f"Contact {phone}"],
+        })
+
+        self.assertNotIn(phone, str(result))
+        self.assertIn("[REDACTED_PHONE]", str(result))
 
 
 if __name__ == "__main__":
