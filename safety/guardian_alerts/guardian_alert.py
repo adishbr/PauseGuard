@@ -1,4 +1,5 @@
-"""Privacy-safe guardian notification messages."""
+
+"""Privacy-safe, localized guardian notification messages."""
 
 from datetime import datetime, timezone
 
@@ -9,12 +10,13 @@ MESSAGES = {
         "Please open the app to view the available details."
     ),
     "hi": (
-        "PauseGuard ko aapse ek suraksha alert ki samiksha chahiye. "
-        "Vivaran dekhne ke liye app kholen."
+        "PauseGuard को सुरक्षा अलर्ट की समीक्षा के लिए आपकी "
+        "सहायता चाहिए। उपलब्ध जानकारी देखने के लिए कृपया ऐप खोलें।"
     ),
     "kn": (
-        "PauseGuard ge nimminda surakshata eccharikeyannu "
-        "parishilisalu agatyavide. Vivara nodalu app tereyiri."
+        "ಸುರಕ್ಷತಾ ಎಚ್ಚರಿಕೆಯನ್ನು ಪರಿಶೀಲಿಸಲು PauseGuard ಗೆ ನಿಮ್ಮ "
+        "ಸಹಾಯದ ಅಗತ್ಯವಿದೆ. ಲಭ್ಯವಿರುವ ವಿವರಗಳನ್ನು ನೋಡಲು ದಯವಿಟ್ಟು "
+        "ಆ್ಯಪ್ ತೆರೆಯಿರಿ."
     ),
 }
 
@@ -37,7 +39,9 @@ def build_guardian_alert(
     if not isinstance(locale, str):
         locale = "en"
 
-    language = locale.split("-")[0].lower()
+    normalized_locale = locale.strip().replace("_", "-")
+    language = normalized_locale.split("-")[0].lower()
+
     if language not in MESSAGES:
         language = "en"
 

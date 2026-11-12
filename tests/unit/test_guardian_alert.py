@@ -30,18 +30,22 @@ class TestGuardianAlert(unittest.TestCase):
     def test_english_locale(self):
         alert = build_guardian_alert("CASE-004", "en")
         self.assertEqual(alert["locale"], "en")
+        self.assertEqual(alert["message"], MESSAGES["en"])
 
     def test_hindi_locale(self):
         alert = build_guardian_alert("CASE-005", "hi")
         self.assertEqual(alert["locale"], "hi")
+        self.assertEqual(alert["message"], MESSAGES["hi"])
 
     def test_kannada_locale(self):
         alert = build_guardian_alert("CASE-006", "kn")
         self.assertEqual(alert["locale"], "kn")
+        self.assertEqual(alert["message"], MESSAGES["kn"])
 
     def test_unknown_locale_falls_back_to_english(self):
         alert = build_guardian_alert("CASE-007", "fr")
         self.assertEqual(alert["locale"], "en")
+        self.assertEqual(alert["message"], MESSAGES["en"])
 
     def test_empty_case_id_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -54,8 +58,6 @@ class TestGuardianAlert(unittest.TestCase):
     def test_alert_timestamp_exists(self):
         alert = build_guardian_alert("CASE-008")
         self.assertIn("created_at", alert)
-
-    # Additional negative and edge-case tests
 
     def test_case_id_with_exactly_100_characters_is_accepted(self):
         case_id = "A" * 100
@@ -126,9 +128,7 @@ class TestGuardianAlert(unittest.TestCase):
     def test_alert_timestamp_is_valid_iso_format(self):
         alert = build_guardian_alert("CASE-015")
 
-        parsed = datetime.fromisoformat(
-            alert["created_at"]
-        )
+        parsed = datetime.fromisoformat(alert["created_at"])
 
         self.assertIsNotNone(parsed.tzinfo)
         self.assertIsNotNone(parsed.utcoffset())
@@ -136,10 +136,50 @@ class TestGuardianAlert(unittest.TestCase):
     def test_message_is_non_empty_for_all_supported_locales(self):
         for locale in ("en", "hi", "kn"):
             with self.subTest(locale=locale):
-                alert = build_guardian_alert(
-                    "CASE-016", locale
-                )
+                alert = build_guardian_alert("CASE-016", locale)
                 self.assertTrue(alert["message"].strip())
+
+    # Phase 6: Localization improvements
+
+    def test_hindi_message_uses_devanagari_script(self):
+        alert = build_guardian_alert("CASE-017", "hi")
+
+        self.assertTrue(
+            any("\u0900" <= char <= "\u097F"
+                for char in alert["message"])
+        )
+
+    def test_kannada_message_uses_kannada_script(self):
+        alert = build_guardian_alert("CASE-018", "kn")
+
+        self.assertTrue(
+            any("\u0C80" <= char <= "\u0CFF"
+                for char in alert["message"])
+        )
+
+    def test_hindi_underscore_locale_is_supported(self):
+        alert = build_guardian_alert("CASE-019", "hi_IN")
+
+        self.assertEqual(alert["locale"], "hi")
+        self.assertEqual(alert["message"], MESSAGES["hi"])
+
+    def test_kannada_underscore_locale_is_supported(self):
+        alert = build_guardian_alert("CASE-020", "kn_IN")
+
+        self.assertEqual(alert["locale"], "kn")
+        self.assertEqual(alert["message"], MESSAGES["kn"])
+
+    def test_locale_with_surrounding_whitespace_is_normalized(self):
+        alert = build_guardian_alert("CASE-021", " hi-IN ")
+
+        self.assertEqual(alert["locale"], "hi")
+        self.assertEqual(alert["message"], MESSAGES["hi"])
+
+    def test_empty_locale_falls_back_to_english(self):
+        alert = build_guardian_alert("CASE-022", "")
+
+        self.assertEqual(alert["locale"], "en")
+        self.assertEqual(alert["message"], MESSAGES["en"])
 
 
 if __name__ == "__main__":
