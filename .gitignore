@@ -17,3 +17,11 @@ node_modules/
 dist/
 # Windows OS
 Thumbs.db
+
+# Python coverage output
+.coverage
+htmlcov/
+
+# Python coverage output
+.coverage
+htmlcov/
