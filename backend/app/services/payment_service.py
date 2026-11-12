@@ -45,7 +45,11 @@ from app.auth.exceptions import (
     AuthorizationError,
     GuardianAssignmentError,
 )
-from app.auth.identities import get_authoritative_guardian_for_payer
+from app.auth.identities import (
+    SYNTHETIC_OTHER_PAYER_ID,
+    SYNTHETIC_PAYER_ID,
+    get_authoritative_guardian_for_payer,
+)
 from app.auth.schemas import (
     FullPaymentView,
     GuardianDecisionRequest,
@@ -54,6 +58,7 @@ from app.auth.schemas import (
     PaymentCreateRequest,
     PaymentDecisionResponse,
     PaymentFallbackResponse,
+    PaymentWarningAckResponse,
     RedactedPaymentView,
 )
 from app.models.roles import UserRole
@@ -65,6 +70,7 @@ from app.services.payment_guards import (
     guardian_timeout_target,
     require_payer_confirmation_preconditions,
 )
+from app.services.policy_engine import evaluate_payment_policy
 
 
 def _build_alert(case_id: str) -> dict:
@@ -93,6 +99,9 @@ class PaymentRecord:
     confirmed_at: Optional[str] = None
 
 
+DEFAULT_MOCK_BALANCE_PAISE = 100000000  # ₹1,000,000 default mock balance
+
+
 class PaymentService:
     """Thread-safe in-memory repository and state transition orchestrator for V2 payments."""
 
@@ -100,7 +109,13 @@ class PaymentService:
         self._lock = threading.Lock()
         self._payments: Dict[str, PaymentRecord] = {}
         self._idempotency_index: Dict[tuple[UUID, str], str] = {}
-        self._safe_lock_states: Dict[UUID, bool] = {}
+        self._safe_lock_states: Dict[UUID, bool] = {
+            SYNTHETIC_PAYER_ID: False,
+            SYNTHETIC_OTHER_PAYER_ID: False,
+        }
+        self._accounts: Dict[UUID, int] = {}
+        self._ledger_entries: list[dict] = []
+        self._confirm_idempotency_map: Dict[tuple[str, str], PaymentConfirmResponse] = {}
 
     def reset_for_testing(self) -> None:
         """Reset repository state for isolated test execution."""
@@ -108,6 +123,32 @@ class PaymentService:
             self._payments.clear()
             self._idempotency_index.clear()
             self._safe_lock_states.clear()
+            self._safe_lock_states[SYNTHETIC_PAYER_ID] = False
+            self._safe_lock_states[SYNTHETIC_OTHER_PAYER_ID] = False
+            self._accounts.clear()
+            self._ledger_entries.clear()
+            self._confirm_idempotency_map.clear()
+
+    def get_account_balance(self, user_id: UUID) -> int:
+        """Retrieve current mock account balance in paise."""
+        with self._lock:
+            if user_id not in self._accounts:
+                self._accounts[user_id] = DEFAULT_MOCK_BALANCE_PAISE
+            return self._accounts[user_id]
+
+    def set_account_balance(self, user_id: UUID, balance_paise: int) -> None:
+        """Set mock account balance in paise for testing."""
+        with self._lock:
+            if balance_paise < 0:
+                raise ValueError("Account balance cannot be negative")
+            self._accounts[user_id] = balance_paise
+
+    def get_ledger_entries(self, payment_id: Optional[str] = None) -> list[dict]:
+        """Retrieve immutable mock ledger entries."""
+        with self._lock:
+            if payment_id:
+                return [e for e in self._ledger_entries if e["payment_id"] == payment_id]
+            return list(self._ledger_entries)
 
     def set_safe_lock(self, payer_id: UUID, is_locked: bool) -> None:
         """Set Safe-Lock state for a payer."""
@@ -115,9 +156,9 @@ class PaymentService:
             self._safe_lock_states[payer_id] = is_locked
 
     def get_safe_lock(self, payer_id: UUID) -> Optional[bool]:
-        """Get Safe-Lock state for a payer. Defaults to False (unlocked) if registered."""
+        """Get Safe-Lock state for a payer. None if not registered."""
         with self._lock:
-            return self._safe_lock_states.get(payer_id, False)
+            return self._safe_lock_states.get(payer_id)
 
     def seed_payment(self, record: PaymentRecord) -> None:
         """Seed a specific payment record for testing."""
@@ -130,7 +171,7 @@ class PaymentService:
         actor: TrustedActorContext,
         request: PaymentCreateRequest,
         server_now: Optional[datetime] = None,
-        tier: int = 3,
+        tier: Optional[int] = None,
     ) -> FullPaymentView:
         """Create a new risk-evaluated mock payment."""
         if not isinstance(actor, TrustedActorContext) or UserRole.PAYER not in actor.roles:
@@ -158,11 +199,42 @@ class PaymentService:
                     version=existing.version,
                 )
 
-            # Evaluate risk tier and guardian requirement
+            # Evaluate risk policy deterministically; fail closed if Safe-Lock state is unavailable
+            safe_lock_state = self._safe_lock_states.get(actor.user_id)
+            if safe_lock_state is None:
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail="Authoritative Safe-Lock state is unavailable for payer; payment rejected (fail-closed)",
+                )
+            if safe_lock_state is True:
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail="Payment rejected: Safe-Lock is currently engaged",
+                )
+            safe_lock_locked = False
+            policy_res = evaluate_payment_policy(
+                payer_id=actor.user_id,
+                amount_paise=request.amount_paise,
+                beneficiary_id=request.beneficiary_id,
+                purpose=request.purpose,
+                is_safe_locked=safe_lock_locked,
+            )
+
+            if tier is not None:
+                effective_tier = tier
+                requires_guardian = (effective_tier == 3)
+                requires_warning_ack = (effective_tier == 1)
+            else:
+                effective_tier = policy_res.tier
+                requires_guardian = policy_res.requires_guardian
+                requires_warning_ack = policy_res.requires_warning_ack
+
             assigned_guardian: Optional[UUID] = None
             deadline: Optional[datetime] = None
 
-            if tier == 3 or request.amount_paise >= 5_000_000:
+            if policy_res.is_hard_blocked:
+                init_status = PaymentStatus.REJECTED
+            elif requires_guardian:
                 # High risk / Tier 3 requires enrolled guardian review
                 authoritative_guardian = get_authoritative_guardian_for_payer(actor.user_id)
                 if authoritative_guardian is None:
@@ -173,9 +245,9 @@ class PaymentService:
                 assigned_guardian = authoritative_guardian
                 deadline = now + timedelta(seconds=30)
                 init_status = PaymentStatus.AWAITING_GUARDIAN
-                effective_tier = 3
+            elif requires_warning_ack:
+                init_status = PaymentStatus.AWAITING_WARNING
             else:
-                effective_tier = tier
                 init_status = PaymentStatus.READY_TO_EXECUTE
 
             payment_id = f"pg_{uuid4().hex[:16]}"
@@ -379,6 +451,11 @@ class PaymentService:
     ) -> PaymentConfirmResponse:
         """Confirm final payment execution by the authenticated owning payer."""
         with self._lock:
+            # Check confirmation idempotency first
+            cached_confirm = self._confirm_idempotency_map.get((payment_id, request.idempotency_key))
+            if cached_confirm is not None:
+                return cached_confirm
+
             record = self._payments.get(payment_id)
             if record is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
@@ -387,13 +464,26 @@ class PaymentService:
             if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
                 raise AuthorizationError("Forbidden: Only the authenticated owning payer can execute payment")
 
-            # Check Safe-Lock
-            safe_lock_locked = self._safe_lock_states.get(record.payer_id, False)
-            if safe_lock_locked:
+            # Reject if already terminal
+            if record.status == PaymentStatus.EXECUTED:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Payment has already been executed",
+                )
+
+            # Check Safe-Lock; fail closed if state is unavailable or locked
+            safe_lock_state = self._safe_lock_states.get(record.payer_id)
+            if safe_lock_state is None:
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail="Authoritative Safe-Lock state is unavailable for payer; payment confirmation rejected (fail-closed)",
+                )
+            if safe_lock_state is True:
                 raise HTTPException(
                     status_code=status.HTTP_423_LOCKED,
                     detail="Payment rejected: Safe-Lock is currently engaged",
                 )
+            safe_lock_locked = False
 
             try:
                 require_payer_confirmation_preconditions(
@@ -406,16 +496,131 @@ class PaymentService:
             except PaymentGuardError as e:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
+            # Mock account balance check
+            balance = self._accounts.get(record.payer_id, DEFAULT_MOCK_BALANCE_PAISE)
+            if balance < record.amount_paise:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Insufficient mock account balance for payment execution",
+                )
+
+            # Atomic mock balance debit
+            self._accounts[record.payer_id] = balance - record.amount_paise
+
             now_str = datetime.now(timezone.utc).isoformat()
+
+            # Record immutable mock ledger entry
+            ledger_entry = {
+                "id": str(uuid4()),
+                "payment_id": record.id,
+                "account_id": str(record.payer_id),
+                "amount_paise": record.amount_paise,
+                "entry_type": "DEBIT",
+                "idempotency_key": f"debit_{record.id}_{request.idempotency_key}",
+                "created_at": now_str,
+            }
+            self._ledger_entries.append(ledger_entry)
+
+            # In double-entry P2P flows: if beneficiary is a registered user with an account, credit them
+            beneficiary_uuid = None
+            try:
+                beneficiary_uuid = UUID(record.beneficiary_id)
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+            if beneficiary_uuid is not None:
+                ben_balance = self._accounts.get(beneficiary_uuid, DEFAULT_MOCK_BALANCE_PAISE)
+                self._accounts[beneficiary_uuid] = ben_balance + record.amount_paise
+                credit_entry = {
+                    "id": str(uuid4()),
+                    "payment_id": record.id,
+                    "account_id": str(beneficiary_uuid),
+                    "amount_paise": record.amount_paise,
+                    "entry_type": "CREDIT",
+                    "idempotency_key": f"credit_{record.id}_{request.idempotency_key}",
+                    "created_at": now_str,
+                }
+                self._ledger_entries.append(credit_entry)
+
             record.status = PaymentStatus.EXECUTED
             record.version += 1
             record.confirmed_at = now_str
+
+            response = PaymentConfirmResponse(
+                payment_id=record.id,
+                status=record.status.value,
+                amount_paise=record.amount_paise,
+                confirmed_at=now_str,
+            )
+            self._confirm_idempotency_map[(payment_id, request.idempotency_key)] = response
+            return response
+
+    def cancel_payment(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> PaymentConfirmResponse:
+        """Cancel an eligible non-terminal payment by the authenticated owning payer."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Forbidden: Only the authenticated owning payer can cancel a payment")
+
+            if record.status in (
+                PaymentStatus.EXECUTED,
+                PaymentStatus.REJECTED,
+                PaymentStatus.CANCELLED,
+                PaymentStatus.EXPIRED,
+                PaymentStatus.FAILED,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Cannot cancel terminal payment in state {record.status.value}",
+                )
+
+            now_str = datetime.now(timezone.utc).isoformat()
+            record.status = PaymentStatus.CANCELLED
+            record.version += 1
 
             return PaymentConfirmResponse(
                 payment_id=record.id,
                 status=record.status.value,
                 amount_paise=record.amount_paise,
                 confirmed_at=now_str,
+            )
+
+    def acknowledge_warning(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> PaymentWarningAckResponse:
+        """Acknowledge high-risk or threshold warning by the owning payer."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can acknowledge a payment warning")
+
+            if record.status != PaymentStatus.AWAITING_WARNING:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Payment is in status {record.status.value}, cannot acknowledge warning",
+                )
+
+            now_str = datetime.now(timezone.utc).isoformat()
+            record.status = PaymentStatus.READY_TO_EXECUTE
+            record.version += 1
+
+            return PaymentWarningAckResponse(
+                payment_id=record.id,
+                status=record.status.value,
+                acknowledged_at=now_str,
+                can_execute_payment=False,
             )
 
 

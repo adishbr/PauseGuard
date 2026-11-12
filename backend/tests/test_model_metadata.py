@@ -9,25 +9,63 @@ from sqlalchemy.orm import configure_mappers
 from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 
 from app.models.database import Base
-from app.models.metadata import MockAccount, RoleBinding, SafeLockState, SyntheticUser, UserRole, metadata
+from app.models.metadata import (
+    AuditEvent,
+    GuardianDecision,
+    IdempotencyRecord,
+    LedgerEntry,
+    MockAccount,
+    Payment,
+    RoleBinding,
+    SafeLockState,
+    SyntheticUser,
+    UserRole,
+    metadata,
+)
+
+ALL_TABLES = [
+    "users",
+    "role_bindings",
+    "accounts",
+    "safe_lock_states",
+    "payments",
+    "guardian_decisions",
+    "ledger_entries",
+    "audit_events",
+    "idempotency_records",
+]
+
+ALL_MODELS = (
+    SyntheticUser,
+    RoleBinding,
+    MockAccount,
+    SafeLockState,
+    Payment,
+    GuardianDecision,
+    LedgerEntry,
+    AuditEvent,
+    IdempotencyRecord,
+)
 
 
 def test_only_approved_tables_reuse_foundation_base():
     assert metadata is Base.metadata
-    assert set(metadata.tables) == {"users", "role_bindings", "accounts", "safe_lock_states"}
-    assert all(issubclass(model, Base) for model in (SyntheticUser, RoleBinding, MockAccount, SafeLockState))
+    assert set(metadata.tables) == set(ALL_TABLES)
+    assert all(issubclass(model, Base) for model in ALL_MODELS)
     configure_mappers()
 
 
-@pytest.mark.parametrize("table_name", ["users", "role_bindings", "accounts", "safe_lock_states"])
+@pytest.mark.parametrize("table_name", ALL_TABLES)
 def test_postgresql_ddl_compiles_without_connections(table_name):
     table = metadata.tables[table_name]
     sql = str(CreateTable(table).compile(dialect=postgresql.dialect()))
     assert f"CREATE TABLE {table_name}" in sql
-    assert "TIMESTAMP WITH TIME ZONE" in sql
-    assert "UUID NOT NULL" in sql
+    if any(isinstance(c.type, DateTime) for c in table.c):
+        assert "TIMESTAMP WITH TIME ZONE" in sql
+    if any(isinstance(c.type, Uuid) for c in table.c):
+        assert "UUID NOT NULL" in sql
     for index in table.indexes:
-        assert "CREATE INDEX" in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+        assert "INDEX" in str(CreateIndex(index).compile(dialect=postgresql.dialect()))
 
 
 def test_role_binding_vocabulary_and_duplicate_grant_constraint():
@@ -45,6 +83,7 @@ def test_role_binding_vocabulary_and_duplicate_grant_constraint():
 
 @pytest.mark.parametrize("table_name,column", [
     ("role_bindings", "user_id"), ("accounts", "owner_id"), ("safe_lock_states", "payer_id"),
+    ("payments", "payer_id"), ("guardian_decisions", "guardian_id"),
 ])
 def test_ownership_foreign_keys_are_required_uuid_and_restrict_delete(table_name, column):
     field = metadata.tables[table_name].c[column]
@@ -81,7 +120,7 @@ def test_safe_lock_has_no_implicit_unlock_or_additional_modes():
     assert set(table.c.keys()) == {"payer_id", "is_locked", "version", "created_at", "updated_at"}
 
 
-@pytest.mark.parametrize("model", [MockAccount, SafeLockState])
+@pytest.mark.parametrize("model", [MockAccount, SafeLockState, Payment])
 def test_positive_version_and_orm_optimistic_lock_declaration(model):
     table = model.__table__
     assert table.c.version.nullable is False
@@ -94,10 +133,14 @@ def test_timestamps_are_timezone_aware_and_required():
         for field in table.c:
             if isinstance(field.type, DateTime):
                 assert field.type.timezone is True
-                assert field.nullable is False
-                assert field.server_default is not None
+                if field.name == "guardian_deadline":
+                    assert field.nullable is True
+                else:
+                    assert field.nullable is False
+                    assert field.server_default is not None
     assert MockAccount.__table__.c.updated_at.onupdate is not None
     assert SafeLockState.__table__.c.updated_at.onupdate is not None
+    assert Payment.__table__.c.updated_at.onupdate is not None
 
 
 def test_in_memory_relationships_have_no_delete_cascade_or_account_limit():

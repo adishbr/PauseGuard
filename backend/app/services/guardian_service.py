@@ -82,17 +82,24 @@ class GuardianService:
         self._seed_default_state()
 
     def _seed_default_state(self) -> None:
-        """Seed default canonical synthetic identities and enrollment for offline tests and local demo."""
+        """Seed default canonical synthetic identities and enrollment for offline tests and local demo.
+        
+        SECURITY CAVEAT:
+        These synthetic identities (SYNTHETIC_GUARDIAN_ID and SYNTHETIC_PAYER_ID) are strictly
+        intended for isolated unit tests, offline test harnesses, and local development demonstration.
+        In production or staging environments, synthetic identities MUST NEVER be trusted or seeded;
+        genuine server-side cryptographic KYC/identity verification is mandatory.
+        """
         now_str = datetime.now(timezone.utc).isoformat()
         
-        # Canonical server-verified synthetic guardian
+        # Canonical server-verified synthetic guardian (local/test only)
         self._verified_identities[SYNTHETIC_GUARDIAN_ID] = GuardianIdentityEvidence(
             guardian_id=SYNTHETIC_GUARDIAN_ID,
             is_verified=True,
             method="trusted_backend_verification",
         )
 
-        # Default pre-enrolled synthetic relationship
+        # Default pre-enrolled synthetic relationship (local/test only)
         self._enrollments[SYNTHETIC_PAYER_ID] = EnrollmentRecord(
             enrollment_id=uuid4(),
             payer_id=SYNTHETIC_PAYER_ID,
@@ -124,6 +131,25 @@ class GuardianService:
             if rec and rec.status == "active":
                 return rec.guardian_id
         return None
+
+    def is_guardian_verified(self, guardian_id: UUID) -> bool:
+        """Check whether a guardian holds valid server-side identity verification.
+
+        Client-supplied claims or unverified IDs fail closed (return False).
+        """
+        if not isinstance(guardian_id, UUID):
+            return False
+        with self._lock:
+            evidence = self._verified_identities.get(guardian_id)
+            if not evidence:
+                return False
+            eval_result = _evaluate_identity(
+                expected_guardian_id=str(guardian_id),
+                verified_guardian_id=str(evidence.guardian_id),
+                identity_verified=evidence.is_verified,
+                verification_method=evidence.method,
+            )
+            return bool(eval_result.verified)
 
     def enroll_guardian(
         self,

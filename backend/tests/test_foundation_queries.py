@@ -4,7 +4,14 @@ from sqlalchemy.dialects import postgresql
 
 from app.models.user import UserRole
 from app.services.foundation_queries import (
-    owned_account_for_update, role_bindings_for_update, safe_lock_for_update,
+    guardian_decision_for_update,
+    idempotency_record_for_update,
+    owned_account_for_update,
+    payer_account_for_update,
+    payment_for_update,
+    role_bindings_for_update,
+    safe_lock_for_payer_for_update,
+    safe_lock_for_update,
 )
 from app.services.payment_guards import TrustedActorContext
 
@@ -16,6 +23,11 @@ def test_persisted_grants_and_owned_rows_are_bound_and_locked_offline():
         (role_bindings_for_update(actor), "role_bindings.user_id =", {actor_id}),
         (owned_account_for_update(actor, account_id), "accounts.owner_id =", {actor_id, account_id}),
         (safe_lock_for_update(actor), "safe_lock_states.payer_id =", {actor_id}),
+        (safe_lock_for_payer_for_update(actor_id), "safe_lock_states.payer_id =", {actor_id}),
+        (payer_account_for_update(actor_id), "accounts.owner_id =", {actor_id}),
+        (payment_for_update("pg_test_001"), "payments.id =", {"pg_test_001"}),
+        (guardian_decision_for_update("pg_test_001"), "guardian_decisions.payment_id =", {"pg_test_001"}),
+        (idempotency_record_for_update("idem_key_001"), "idempotency_records.key =", {"idem_key_001"}),
     ]
     for statement, predicate, values in cases:
         compiled = statement.compile(dialect=postgresql.dialect())

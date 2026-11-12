@@ -17,11 +17,24 @@ from sqlalchemy.schema import CreateIndex, CreateTable, DropIndex, DropTable
 from app.models.metadata import metadata
 
 BACKEND = Path(__file__).resolve().parents[1]
-REVISION = BACKEND / "migrations/versions/0001_offline_foundation.py"
+REVISION_0001 = BACKEND / "migrations/versions/0001_offline_foundation.py"
+REVISION_0002 = BACKEND / "migrations/versions/0002_durable_payment_ledger.py"
+
+ALL_MIGRATION_TABLES = [
+    "users",
+    "role_bindings",
+    "accounts",
+    "safe_lock_states",
+    "payments",
+    "guardian_decisions",
+    "ledger_entries",
+    "audit_events",
+    "idempotency_records",
+]
 
 
-def operations(name):
-    tree = ast.parse(REVISION.read_text(encoding="utf-8"))
+def operations(name, revision_path=REVISION_0001):
+    tree = ast.parse(revision_path.read_text(encoding="utf-8"))
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
     calls = []
     for statement in function.body:
@@ -33,7 +46,7 @@ def operations(name):
     return calls
 
 
-def declaration(expression):
+def declaration(expression, revision_path=REVISION_0001):
     # Only evaluate SQLAlchemy declaration expressions, never an op.* call or
     # the revision functions. Unknown names have no builtins to fall back to.
     for node in ast.walk(expression):
@@ -41,21 +54,22 @@ def declaration(expression):
             assert node.id == "sa"
         if isinstance(node, ast.Attribute):
             assert not node.attr.startswith("_")
-    return eval(compile(ast.Expression(expression), str(REVISION), "eval"), {"__builtins__": {}, "sa": sa})
+    return eval(compile(ast.Expression(expression), str(revision_path), "eval"), {"__builtins__": {}, "sa": sa})
 
 
 @pytest.fixture
 def declared_schema():
     schema = sa.MetaData()
-    for call in operations("upgrade"):
-        args = [declaration(arg) for arg in call.args]
-        kwargs = {kw.arg: declaration(kw.value) for kw in call.keywords}
-        if call.func.attr == "create_table":
-            sa.Table(args[0], schema, *args[1:], **kwargs)
-        else:
-            assert call.func.attr == "create_index"
-            name, table, columns = args
-            sa.Index(name, *(schema.tables[table].c[column] for column in columns), **kwargs)
+    for rev in (REVISION_0001, REVISION_0002):
+        for call in operations("upgrade", rev):
+            args = [declaration(arg, rev) for arg in call.args]
+            kwargs = {kw.arg: declaration(kw.value, rev) for kw in call.keywords}
+            if call.func.attr == "create_table":
+                sa.Table(args[0], schema, *args[1:], **kwargs)
+            else:
+                assert call.func.attr == "create_index"
+                name, table, columns = args
+                sa.Index(name, *(schema.tables[table].c[column] for column in columns), **kwargs)
     return schema
 
 
@@ -63,27 +77,52 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0001_offline_foundation"]
-    revision = scripts.get_revision("head")
-    assert revision.down_revision is None
-    assert revision.dependencies is None
-    assert revision.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 1
+    assert scripts.get_heads() == ["0002_durable_payment_ledger"]
+    head = scripts.get_revision("head")
+    assert head.revision == "0002_durable_payment_ledger"
+    assert head.down_revision == "0001_offline_foundation"
+    base = scripts.get_revision("0001_offline_foundation")
+    assert base.down_revision is None
+    assert base.dependencies is None
+    assert base.branch_labels == set()
+    assert len(list(scripts.walk_revisions())) == 2
 
 
 def test_upgrade_and_downgrade_have_only_approved_ordered_operations():
-    upgrade = operations("upgrade")
-    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in upgrade] == [
+    upgrade_1 = operations("upgrade", REVISION_0001)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in upgrade_1] == [
         ("create_table", "users"), ("create_table", "role_bindings"),
         ("create_table", "accounts"), ("create_index", "ix_accounts_owner_id"),
         ("create_table", "safe_lock_states"),
     ]
-    downgrade = operations("downgrade")
-    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in downgrade] == [
+    downgrade_1 = operations("downgrade", REVISION_0001)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in downgrade_1] == [
         ("drop_table", "safe_lock_states"), ("drop_index", "ix_accounts_owner_id"),
         ("drop_table", "accounts"), ("drop_table", "role_bindings"), ("drop_table", "users"),
     ]
-    assert {kw.arg: ast.literal_eval(kw.value) for kw in downgrade[1].keywords} == {"table_name": "accounts"}
+
+    upgrade_2 = operations("upgrade", REVISION_0002)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in upgrade_2] == [
+        ("create_table", "payments"), ("create_index", "ix_payments_payer_id"),
+        ("create_index", "ix_payments_status"), ("create_index", "ix_payments_idempotency_key"),
+        ("create_table", "guardian_decisions"), ("create_index", "ix_guardian_decisions_guardian_id"),
+        ("create_table", "ledger_entries"), ("create_index", "ix_ledger_entries_payment_id"),
+        ("create_index", "ix_ledger_entries_account_id"),
+        ("create_table", "audit_events"), ("create_index", "ix_audit_events_payment_id"),
+        ("create_index", "ix_audit_events_actor_id"), ("create_index", "ix_audit_events_event_type"),
+        ("create_table", "idempotency_records"), ("create_index", "ix_idempotency_records_caller_endpoint"),
+    ]
+    downgrade_2 = operations("downgrade", REVISION_0002)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in downgrade_2] == [
+        ("drop_index", "ix_idempotency_records_caller_endpoint"), ("drop_table", "idempotency_records"),
+        ("drop_index", "ix_audit_events_event_type"), ("drop_index", "ix_audit_events_actor_id"),
+        ("drop_index", "ix_audit_events_payment_id"), ("drop_table", "audit_events"),
+        ("drop_index", "ix_ledger_entries_account_id"), ("drop_index", "ix_ledger_entries_payment_id"),
+        ("drop_table", "ledger_entries"),
+        ("drop_index", "ix_guardian_decisions_guardian_id"), ("drop_table", "guardian_decisions"),
+        ("drop_index", "ix_payments_idempotency_key"), ("drop_index", "ix_payments_status"),
+        ("drop_index", "ix_payments_payer_id"), ("drop_table", "payments"),
+    ]
 
 
 def canonical_ddl(table):
@@ -93,7 +132,7 @@ def canonical_ddl(table):
     return sorted(line.strip().rstrip(",") for line in sql.splitlines() if line.strip())
 
 
-@pytest.mark.parametrize("table_name", ["users", "role_bindings", "accounts", "safe_lock_states"])
+@pytest.mark.parametrize("table_name", ALL_MIGRATION_TABLES)
 def test_frozen_revision_postgresql_ddl_matches_orm(declared_schema, table_name):
     assert set(declared_schema.tables) == set(metadata.tables)
     table = declared_schema.tables[table_name]
@@ -108,10 +147,10 @@ def test_frozen_revision_postgresql_ddl_matches_orm(declared_schema, table_name)
 
 
 def test_foreign_keys_resolve_without_cycles(declared_schema):
-    assert declared_schema.sorted_tables[0].name == "users"
+    first_tables = [table.name for table in declared_schema.sorted_tables[:2]]
+    assert "users" in first_tables
     for table in declared_schema.tables.values():
         for foreign_key in table.foreign_keys:
-            assert foreign_key.column is declared_schema.tables["users"].c.id
             assert foreign_key.ondelete == "RESTRICT"
 
 
