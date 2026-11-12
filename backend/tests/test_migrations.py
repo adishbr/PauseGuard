@@ -19,6 +19,7 @@ from app.models.metadata import metadata
 BACKEND = Path(__file__).resolve().parents[1]
 REVISION_0001 = BACKEND / "migrations/versions/0001_offline_foundation.py"
 REVISION_0002 = BACKEND / "migrations/versions/0002_durable_payment_ledger.py"
+REVISION_0003 = BACKEND / "migrations/versions/0003_razorpay_merchant_sandbox.py"
 
 ALL_MIGRATION_TABLES = [
     "users",
@@ -30,6 +31,9 @@ ALL_MIGRATION_TABLES = [
     "ledger_entries",
     "audit_events",
     "idempotency_records",
+    "razorpay_orders",
+    "razorpay_payments",
+    "razorpay_webhook_events",
 ]
 
 
@@ -60,7 +64,7 @@ def declaration(expression, revision_path=REVISION_0001):
 @pytest.fixture
 def declared_schema():
     schema = sa.MetaData()
-    for rev in (REVISION_0001, REVISION_0002):
+    for rev in (REVISION_0001, REVISION_0002, REVISION_0003):
         for call in operations("upgrade", rev):
             args = [declaration(arg, rev) for arg in call.args]
             kwargs = {kw.arg: declaration(kw.value, rev) for kw in call.keywords}
@@ -77,15 +81,17 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0002_durable_payment_ledger"]
+    assert scripts.get_heads() == ["0003_razorpay_merchant_sandbox"]
     head = scripts.get_revision("head")
-    assert head.revision == "0002_durable_payment_ledger"
-    assert head.down_revision == "0001_offline_foundation"
+    assert head.revision == "0003_razorpay_merchant_sandbox"
+    assert head.down_revision == "0002_durable_payment_ledger"
+    rev2 = scripts.get_revision("0002_durable_payment_ledger")
+    assert rev2.down_revision == "0001_offline_foundation"
     base = scripts.get_revision("0001_offline_foundation")
     assert base.down_revision is None
     assert base.dependencies is None
     assert base.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 2
+    assert len(list(scripts.walk_revisions())) == 3
 
 
 def test_upgrade_and_downgrade_have_only_approved_ordered_operations():
@@ -124,6 +130,37 @@ def test_upgrade_and_downgrade_have_only_approved_ordered_operations():
         ("drop_index", "ix_payments_payer_id"), ("drop_table", "payments"),
     ]
 
+    upgrade_3 = operations("upgrade", REVISION_0003)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in upgrade_3] == [
+        ("create_table", "razorpay_orders"),
+        ("create_index", "ix_razorpay_orders_razorpay_order_id"),
+        ("create_index", "ix_razorpay_orders_admin_id"),
+        ("create_index", "ix_razorpay_orders_status"),
+        ("create_index", "ix_razorpay_orders_receipt"),
+        ("create_table", "razorpay_payments"),
+        ("create_index", "ix_razorpay_payments_order_id"),
+        ("create_index", "ix_razorpay_payments_razorpay_order_id"),
+        ("create_index", "ix_razorpay_payments_status"),
+        ("create_table", "razorpay_webhook_events"),
+        ("create_index", "ix_razorpay_webhook_events_event_type"),
+        ("create_index", "ix_razorpay_webhook_events_entity_id"),
+    ]
+    downgrade_3 = operations("downgrade", REVISION_0003)
+    assert [(call.func.attr, ast.literal_eval(call.args[0])) for call in downgrade_3] == [
+        ("drop_index", "ix_razorpay_webhook_events_entity_id"),
+        ("drop_index", "ix_razorpay_webhook_events_event_type"),
+        ("drop_table", "razorpay_webhook_events"),
+        ("drop_index", "ix_razorpay_payments_status"),
+        ("drop_index", "ix_razorpay_payments_razorpay_order_id"),
+        ("drop_index", "ix_razorpay_payments_order_id"),
+        ("drop_table", "razorpay_payments"),
+        ("drop_index", "ix_razorpay_orders_receipt"),
+        ("drop_index", "ix_razorpay_orders_status"),
+        ("drop_index", "ix_razorpay_orders_admin_id"),
+        ("drop_index", "ix_razorpay_orders_razorpay_order_id"),
+        ("drop_table", "razorpay_orders"),
+    ]
+
 
 def canonical_ddl(table):
     # Constraint ordering is insignificant. Exact emitted clauses must match,
@@ -147,7 +184,7 @@ def test_frozen_revision_postgresql_ddl_matches_orm(declared_schema, table_name)
 
 
 def test_foreign_keys_resolve_without_cycles(declared_schema):
-    first_tables = [table.name for table in declared_schema.sorted_tables[:2]]
+    first_tables = [table.name for table in declared_schema.sorted_tables[:3]]
     assert "users" in first_tables
     for table in declared_schema.tables.values():
         for foreign_key in table.foreign_keys:

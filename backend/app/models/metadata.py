@@ -6,6 +6,7 @@ from app.models.database import Base
 from app.models.idempotency import IdempotencyRecord
 from app.models.ledger import LedgerEntry
 from app.models.payment import GuardianDecision, Payment
+from app.models.razorpay import RazorpayOrder, RazorpayPayment, RazorpayWebhookEvent
 from app.models.safe_lock import SafeLockState
 from app.models.user import RoleBinding, SyntheticUser, UserRole
 
@@ -18,6 +19,9 @@ __all__ = [
     "LedgerEntry",
     "MockAccount",
     "Payment",
+    "RazorpayOrder",
+    "RazorpayPayment",
+    "RazorpayWebhookEvent",
     "RoleBinding",
     "SafeLockState",
     "SyntheticUser",
