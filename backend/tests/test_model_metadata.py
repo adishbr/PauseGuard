@@ -16,6 +16,9 @@ from app.models.metadata import (
     LedgerEntry,
     MockAccount,
     Payment,
+    RazorpayOrder,
+    RazorpayPayment,
+    RazorpayWebhookEvent,
     RoleBinding,
     SafeLockState,
     SyntheticUser,
@@ -33,6 +36,9 @@ ALL_TABLES = [
     "ledger_entries",
     "audit_events",
     "idempotency_records",
+    "razorpay_orders",
+    "razorpay_payments",
+    "razorpay_webhook_events",
 ]
 
 ALL_MODELS = (
@@ -45,6 +51,9 @@ ALL_MODELS = (
     LedgerEntry,
     AuditEvent,
     IdempotencyRecord,
+    RazorpayOrder,
+    RazorpayPayment,
+    RazorpayWebhookEvent,
 )
 
 
@@ -133,7 +142,7 @@ def test_timestamps_are_timezone_aware_and_required():
         for field in table.c:
             if isinstance(field.type, DateTime):
                 assert field.type.timezone is True
-                if field.name == "guardian_deadline":
+                if field.name in ("guardian_deadline", "verified_at"):
                     assert field.nullable is True
                 else:
                     assert field.nullable is False

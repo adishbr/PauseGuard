@@ -60,6 +60,7 @@ try:
     assert set(metadata.tables) == {
         'users', 'role_bindings', 'accounts', 'safe_lock_states',
         'payments', 'guardian_decisions', 'ledger_entries', 'audit_events', 'idempotency_records',
+        'razorpay_orders', 'razorpay_payments', 'razorpay_webhook_events',
     }
     expected_routes = {
         '/api/v2/health', '/api/v2/profile',
@@ -84,6 +85,10 @@ try:
         '/api/v2/recovery/guide',
         '/api/v2/risk/advice',
         '/api/v2/policy-lab/simulate',
+        '/api/v2/sandbox/razorpay/orders',
+        '/api/v2/sandbox/razorpay/verify',
+        '/api/v2/sandbox/razorpay/webhook',
+        '/api/v2/sandbox/razorpay/orders/{order_id}',
     }
     assert set(app.openapi()['paths']) == expected_routes
     print('guarded cold import passed')

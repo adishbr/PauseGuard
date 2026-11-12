@@ -8,7 +8,7 @@ It does not create orders, execute payments, process webhooks, or settle funds.
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import FrozenSet
+from typing import FrozenSet, Optional
 
 from app.models.roles import UserRole
 from app.services.payment_guards import TrustedActorContext
@@ -24,6 +24,7 @@ class RazorpaySandboxConfig:
 
     key_id: str = field(repr=False)
     key_secret: str = field(repr=False)
+    webhook_secret: Optional[str] = field(default=None, repr=False)
 
 
 def load_sandbox_config(
@@ -73,10 +74,24 @@ def load_sandbox_config(
             "Live Razorpay keys are prohibited"
         )
 
+    webhook_secret = source.get("RZP_TEST_WEBHOOK_SECRET")
+    if isinstance(webhook_secret, str):
+        webhook_secret = webhook_secret.strip() or None
+    else:
+        webhook_secret = None
+
     return RazorpaySandboxConfig(
         key_id=key_id,
         key_secret=key_secret,
+        webhook_secret=webhook_secret,
     )
+
+
+def get_razorpay_client(config: RazorpaySandboxConfig):
+    """Instantiate the official Razorpay SDK client using validated Test Mode credentials."""
+    import razorpay
+    return razorpay.Client(auth=(config.key_id, config.key_secret))
+
 
 
 def require_sandbox_admin(actor: TrustedActorContext) -> None:

@@ -422,3 +422,72 @@ class PaymentRiskExplanationResponse(BaseModel):
     requires_guardian: bool
     requires_warning_ack: bool
     reasons: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Razorpay Test Mode Merchant Sandbox Schemas
+# ---------------------------------------------------------------------------
+
+class RazorpayOrderCreateRequest(BaseModel):
+    """Request to create an isolated Razorpay Test Mode merchant order."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount_paise: int = Field(..., gt=0, description="Order amount in paise (strictly positive integer)")
+    currency: str = Field("INR", pattern="^INR$", description="Order currency, strictly INR")
+    receipt: str | None = Field(None, max_length=128, description="Optional merchant receipt identifier")
+    notes: dict[str, str] | None = Field(None, description="Optional merchant key-value notes")
+    idempotency_key: str | None = Field(None, max_length=128, description="Optional client idempotency key")
+
+
+class RazorpayOrderResponse(BaseModel):
+    """Internal order details and Razorpay Test Mode order reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    razorpay_order_id: str
+    amount_paise: int
+    currency: str = Field("INR")
+    status: str
+    receipt: str | None = None
+    key_id: str = Field(..., description="Public Test Mode key ID for Razorpay Checkout SDK")
+    created_at: str
+
+
+class RazorpayVerifyRequest(BaseModel):
+    """Client-submitted payment verification payload from Razorpay Checkout handler."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    razorpay_order_id: str = Field(..., min_length=1)
+    razorpay_payment_id: str = Field(..., min_length=1)
+    razorpay_signature: str = Field(..., min_length=64, max_length=64)
+
+
+class RazorpayVerifyResponse(BaseModel):
+    """Server-reconciled verification response for Razorpay Test Mode payment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verified: bool
+    status: str
+    order_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    amount_paise: int
+    currency: str = Field("INR")
+    reconciled_with_provider: bool
+    verified_at: str
+
+
+class RazorpayWebhookResponse(BaseModel):
+    """Acknowledgment of processed or deduplicated Razorpay webhook event."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: str
+    event_id: str
+    event_type: str
+    message: str
+    can_authorize_p2p_payment: bool = Field(False, description="Invariant: merchant webhooks cannot authorize P2P payments")

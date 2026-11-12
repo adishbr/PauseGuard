@@ -8,6 +8,7 @@ from app.api.guardian import router as guardian_router
 from app.api.health import router as health_router
 from app.api.payments import router as payments_router
 from app.api.policy_lab import router as policy_lab_router
+from app.api.razorpay import router as razorpay_router
 from app.api.risk import router as risk_router
 from app.api.safety import (
     anchors_router,
@@ -58,6 +59,7 @@ def create_app(
     application.include_router(recovery_router)
     application.include_router(risk_router)
     application.include_router(policy_lab_router)
+    application.include_router(razorpay_router)
     application.include_router(websocket_router)
 
     return application
