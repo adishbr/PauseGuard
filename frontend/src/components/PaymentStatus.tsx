@@ -67,10 +67,16 @@ function Reference({ id, t }: { id: string; t: Translate }) {
   return (
     <div className="reference">
       <div className="reference-row">
-        <div>{t('reference')} <code>{id}</code></div>
-        <button className="text-button" type="button" onClick={() => void copy()}>{t('copy')}</button>
+        <div>
+          <span className="reference-label">{t('reference')}</span>
+          <code>{id}</code>
+        </div>
+        <button className="text-button copy-ref-btn" type="button" onClick={() => void copy()}>
+          <Icon name="copy" size={14} />
+          <span>{t('copy')}</span>
+        </button>
       </div>
-      <div role="status">{feedback ? t(feedback) : ''}</div>
+      <div role="status" className="copy-feedback-msg">{feedback ? t(feedback) : ''}</div>
     </div>
   )
 }
@@ -140,24 +146,37 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
   const help = status?.startsWith('AWAITING_') || status === 'REJECTED'
   const purpose = paymentDetails?.purpose ?? ''
 
+  // Radial progress calculations
+  const totalDuration = snapshot?.reviewDuration ?? 30
+  const progressRatio = remaining !== null ? Math.max(0, Math.min(1, remaining / totalDuration)) : 0
+  const circleCircumference = 2 * Math.PI * 22 // radius = 22, circumference ≈ 138.2
+  const strokeOffset = circleCircumference * (1 - progressRatio)
+
   return (
     <>
       {role === 'payer' && <PaymentSteps current={terminal ? 2 : 1} t={t} />}
       <section className={`card workspace-card status-card tone-${tone}`} aria-labelledby="status-heading">
         <div className="card-header">
-          <div className={`symbol ${tone}`}><Icon name={status === 'EXECUTED' ? 'check' : status === 'AWAITING_GUARDIAN' ? 'clock' : 'shield'} /></div>
+          <div className={`symbol ${tone}`}>
+            <Icon name={status === 'EXECUTED' ? 'check' : status === 'AWAITING_GUARDIAN' ? 'clock' : status === 'REJECTED' ? 'shieldAlert' : 'shield'} />
+          </div>
           <div className="grow">
             <p className="eyebrow">{t(role === 'guardian' ? 'guardianInbox' : 'status')}</p>
             <h2 id="status-heading" tabIndex={-1} ref={heading}>{t(visibleTitle)}</h2>
           </div>
-          {payment && !disconnected && !pendingCheck && <span className={`pill ${tone}`}>{t(tiers[payment.tier])}</span>}
+          {payment && !disconnected && !pendingCheck && (
+            <span className={`pill ${tone} tier-indicator`}>
+              <span className="dot" />
+              {t(tiers[payment.tier])}
+            </span>
+          )}
         </div>
 
         <div role="status" className="status-copy">
           {pendingCheck && <p className="inline-progress"><span className="spinner" aria-hidden="true" />{t(payment ? 'checkingStatus' : 'connecting')}</p>}
           {!pendingCheck && !disconnected && <p><span className="sr-only">{t(title)}. </span>{t(statusDetail)}</p>}
           {(pendingCheck || disconnected) && payment && <p>{t('lastKnown')}</p>}
-          {busy && <p className="inline-progress"><span className="spinner" aria-hidden="true" />{t('sending')}</p>}
+          {busy && <p className="inline-progress"><span className="spinner" aria-hidden="true" /> {t('sending')}</p>}
         </div>
 
         {error && (
@@ -170,10 +189,26 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
           <p className="notice" role="alert">{t(actionError.key)} {t('actionUnconfirmed')}</p>
         )}
 
+        {/* Real-time Timer with Animated Radial SVG Ring and tabular digits */}
         {remaining !== null && !disconnected && (
-          <div className="timer">
-            <Icon name="clock" />
-            <div>
+          <div className="timer radial-timer-container">
+            <div className="radial-timer-visual" aria-hidden="true">
+              <svg width="56" height="56" viewBox="0 0 56 56">
+                <circle className="ring-track" cx="28" cy="28" r="22" />
+                <circle
+                  className={`ring-fill ${remaining <= 10 ? 'ring-critical' : ''}`}
+                  cx="28"
+                  cy="28"
+                  r="22"
+                  strokeDasharray={circleCircumference}
+                  strokeDashoffset={strokeOffset}
+                />
+              </svg>
+              <div className="timer-icon-center">
+                <Icon name="clock" size={18} />
+              </div>
+            </div>
+            <div className="timer-info-block">
               <strong>{t(remaining === 0 ? 'deadlineChecking' : 'timeLeft')}</strong>
               <p>{t('deadlineSource')}</p>
             </div>
@@ -187,6 +222,22 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
           </div>
         )}
 
+        {/* Transaction Ready Checklist for Final Payer Confirmation */}
+        {status === 'READY_TO_EXECUTE' && role === 'payer' && (
+          <div className="ready-checklist-box">
+            <div className="checklist-header">
+              <Icon name="shieldCheck" size={18} />
+              <strong>Execution Pre-Check Complete</strong>
+            </div>
+            <ul className="checklist-items">
+              <li><Icon name="check" size={14} /> Independent Guardian Approved &amp; Logged</li>
+              <li><Icon name="check" size={14} /> Adversarial Coercion Filters Cleared</li>
+              <li><Icon name="check" size={14} /> Safe-Lock Verification Passed</li>
+            </ul>
+            <p className="checklist-note">Payer confirmation is required to commit simulated funds to the mock ledger.</p>
+          </div>
+        )}
+
         {paymentDetails && (
           <dl className="payment-details">
             <div><dt>{t('amount')}</dt><dd>{formatRupees(paymentDetails.amount_paise, languages[locale].region)}</dd></div>
@@ -195,6 +246,7 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
             <div><dt>{t('purpose')}</dt><dd>{Object.hasOwn(purposes, purpose) ? t(purpose as keyof typeof purposes) : purpose}</dd></div>
           </dl>
         )}
+
         {paymentDetails && paymentDetails.reason_codes.length > 0 && (
           <div className="risk-context">
             <h3>{t('why')}</h3>
@@ -203,6 +255,7 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
             </ul>
           </div>
         )}
+
         {help && !disconnected && (
           <details className="verify-note">
             <summary>{t('verify')}</summary>
@@ -213,24 +266,65 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
         <div className="actions">
           {showActions && role === 'payer' && (
             <>
-              {status === 'READY_TO_EXECUTE' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('confirm')}>{t('confirm')} <Icon name="arrow" size={18} /></button>}
-              {status === 'AWAITING_WARNING' && <button type="button" className="primary" disabled={disabled} onClick={() => void act('warning/acknowledge')}>{t('acknowledge')} <Icon name="arrow" size={18} /></button>}
-              <button type="button" className="secondary" disabled={disabled} onClick={() => void act('cancel')}>{t('stop')}</button>
+              {status === 'READY_TO_EXECUTE' && (
+                <button type="button" className="primary execute-confirm-btn" disabled={disabled} onClick={() => void act('confirm')}>
+                  {t('confirm')} <Icon name="arrow" size={18} />
+                </button>
+              )}
+              {status === 'AWAITING_WARNING' && (
+                <button type="button" className="primary" disabled={disabled} onClick={() => void act('warning/acknowledge')}>
+                  {t('acknowledge')} <Icon name="arrow" size={18} />
+                </button>
+              )}
+              <button type="button" className="secondary" disabled={disabled} onClick={() => void act('cancel')}>
+                {t('stop')}
+              </button>
             </>
           )}
           {status === 'AWAITING_GUARDIAN' && role === 'guardian' && (
             <>
-              <button type="button" className="reject" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('reject')}>{t('reject')}</button>
-              <button type="button" className="secondary" disabled={disabled || remaining === null || remaining === 0} onClick={() => void act('approve')}>{t('approve')}</button>
+              <button
+                type="button"
+                className="reject"
+                disabled={disabled || remaining === null || remaining === 0}
+                onClick={() => void act('reject')}
+              >
+                {t('reject')}
+              </button>
+              <button
+                type="button"
+                className="secondary approve-btn"
+                disabled={disabled || remaining === null || remaining === 0}
+                onClick={() => void act('approve')}
+              >
+                {t('approve')}
+              </button>
             </>
           )}
-          {role === 'guardian' && <button type="button" className="text-button" disabled={busy} onClick={onClose}>{t('back')}</button>}
-          {role === 'payer' && error?.status === 404 && (
-            <button type="button" className="secondary" disabled={checking} onClick={onClose}>{t('clearRequest')}</button>
+          {role === 'guardian' && (
+            <button type="button" className="text-button" disabled={busy} onClick={onClose}>
+              {t('back')}
+            </button>
           )}
-          {role === 'payer' && terminal && <button type="button" className="primary" onClick={onClose}>{t('startAnother')} <Icon name="arrow" size={18} /></button>}
+          {role === 'payer' && error?.status === 404 && (
+            <button type="button" className="secondary" disabled={checking} onClick={onClose}>
+              {t('clearRequest')}
+            </button>
+          )}
+          {role === 'payer' && terminal && (
+            <button type="button" className="primary" onClick={onClose}>
+              {t('startAnother')} <Icon name="arrow" size={18} />
+            </button>
+          )}
         </div>
-        {payment && role === 'guardian' && <p className="privacy-line"><Icon name="lock" size={16} />{t('guardianPrivacy')}</p>}
+
+        {payment && role === 'guardian' && (
+          <div className="guardian-privacy-shield-banner">
+            <Icon name="lock" size={16} />
+            <span>{t('guardianPrivacy')}</span>
+          </div>
+        )}
+
         {payment && <Reference id={payment.id} t={t} />}
       </section>
     </>

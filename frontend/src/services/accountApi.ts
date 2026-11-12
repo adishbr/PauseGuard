@@ -1,6 +1,5 @@
 import { demoAccountPath } from '../types/account.ts'
-import type { DemoProfile, DemoSession, EnrollmentView, ProfileUpdate } from '../types/account.ts'
-import type { Role } from '../types/payment.ts'
+import type { AppRole, DemoProfile, DemoSession, EnrollmentView, ProfileUpdate } from '../types/account.ts'
 import { storageRead, storageWrite } from './demoSession.ts'
 
 export const sessionExpired = 'pauseguard:session-expired'
@@ -14,8 +13,8 @@ export class AccountError extends Error {
   }
 }
 
-export const savedSession = (role: Role) => storageRead('sessionStorage', `pauseguard:demo:session:${role}`)
-export const saveSession = (role: Role, token: string) => storageWrite('sessionStorage', `pauseguard:demo:session:${role}`, token)
+export const savedSession = (role: AppRole) => storageRead('sessionStorage', `pauseguard:demo:session:${role}`)
+export const saveSession = (role: AppRole, token: string) => storageWrite('sessionStorage', `pauseguard:demo:session:${role}`, token)
 
 async function request<T>(path: string, token?: string, body?: object, method = body ? 'POST' : 'GET'): Promise<T> {
   const headers = new Headers()
@@ -39,8 +38,8 @@ async function request<T>(path: string, token?: string, body?: object, method = 
 }
 
 export const accountApi = {
-  login: (role: Role, contact: string, sample = false) => request<DemoSession>('/session', undefined, { role, contact, sample }),
-  register: (role: Role, details: ProfileUpdate) => request<DemoSession>('/register', undefined, { ...details, role }),
+  login: (role: AppRole, contact: string, sample = false) => request<DemoSession>('/session', undefined, { role, contact, sample }),
+  register: (role: AppRole, details: ProfileUpdate) => request<DemoSession>('/register', undefined, { ...details, role }),
   session: (token: string) => request<DemoSession>('/session', token),
   logout: (token: string) => request('/session', token, undefined, 'DELETE'),
   save: (token: string, changes: ProfileUpdate) => request<DemoProfile>('/profile', token, changes),

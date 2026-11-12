@@ -103,50 +103,138 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountI
     }
   }
 
+  // Real-time policy forecast calculation
+  const isFlagged = beneficiary === 'recipient_flagged'
+  const isCoercion = purpose === 'kyc_verification'
+  const isSupplierNew = beneficiary === 'supplier_new'
+
+  const forecastTier = isFlagged ? 3 : isCoercion ? 3 : isSupplierNew ? 1 : 0
+  const forecastLabel = isFlagged
+    ? 'Hard Block (Tier 3) — Known Fraud Entity'
+    : isCoercion
+      ? 'Guardian Circuit Breaker (Tier 3) — High Coercion Risk'
+      : isSupplierNew
+        ? 'Step-Up Verification (Tier 1) — Unverified Recipient'
+        : 'Direct Clearance (Tier 0) — Standard Routine Transfer'
+
+  const quickAmounts = ['100.00', '5000.00', '50000.00', '55000.00']
+
   return (
     <>
       <PaymentSteps current={0} t={t} />
-      <section className="card workspace-card" aria-labelledby="payment-heading">
+      <section className="card workspace-card payment-engine-card" aria-labelledby="payment-heading">
         <div className="card-header">
           <div className="symbol mint"><Icon name="activity" /></div>
           <div>
             <p className="eyebrow">{t('payerWorkspace')}</p>
             <h2 id="payment-heading" ref={heading} tabIndex={-1}>{t('preparePayment')}</h2>
           </div>
+          <span className="pill neutral header-tag">
+            <Icon name="shieldCheck" size={14} /> Mock UPI Rail
+          </span>
         </div>
         <p className="card-lead">{t('formHint')}</p>
+
+        {/* Real-time Dynamic Policy Forecast Banner */}
+        <div className={`policy-forecast-banner tier-${forecastTier}`}>
+          <div className="forecast-icon">
+            <Icon name={forecastTier === 3 ? 'shieldAlert' : forecastTier === 1 ? 'alertTriangle' : 'shieldCheck'} size={18} />
+          </div>
+          <div className="forecast-copy">
+            <span className="forecast-badge">Dynamic Policy Forecast</span>
+            <strong>{forecastLabel}</strong>
+            <p className="field-help">
+              {forecastTier === 3
+                ? isFlagged
+                  ? 'System will refuse execution and alert fraud operations.'
+                  : `Triggers mandatory ${reviewDuration}s independent guardian review.`
+                : forecastTier === 1
+                  ? 'Payer will receive an actionable step-up verification prompt.'
+                  : 'Transaction will proceed directly without requiring human guardian review.'}
+            </p>
+          </div>
+        </div>
+
         <form noValidate onSubmit={(event) => void submit(event)}>
           <fieldset disabled={Boolean(pending)} className="form-fields">
-            <div className="full form-field">
+            {/* Amount input with preset quick chips */}
+            <div className="full form-field amount-block">
               <label htmlFor="amount">{t('amountInput')}</label>
-              <span className={invalidAmount ? 'amount-field field-invalid' : 'amount-field'}>
-                <span aria-hidden="true">₹</span>
-                <input id="amount" ref={amountInput} name="amount" inputMode="decimal" value={amount}
-                  aria-invalid={invalidAmount || undefined} aria-describedby="amount-help"
-                  onChange={(event) => {
-                    setAmount(event.target.value)
-                    setInvalidAmount(false)
-                  }} required />
-              </span>
+              <div className="amount-input-wrapper">
+                <span className={invalidAmount ? 'amount-field field-invalid' : 'amount-field'}>
+                  <span aria-hidden="true">₹</span>
+                  <input
+                    id="amount"
+                    ref={amountInput}
+                    name="amount"
+                    inputMode="decimal"
+                    value={amount}
+                    aria-invalid={invalidAmount || undefined}
+                    aria-describedby="amount-help"
+                    onChange={(event) => {
+                      setAmount(event.target.value)
+                      setInvalidAmount(false)
+                    }}
+                    required
+                  />
+                </span>
+                <div className="quick-amount-chips" role="group" aria-label="Preset amount shortcuts">
+                  {quickAmounts.map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className={`chip ${toPaise(amount) === toPaise(preset) ? 'active' : ''}`}
+                      onClick={() => {
+                        setAmount(preset)
+                        setInvalidAmount(false)
+                      }}
+                    >
+                      ₹{Number(preset).toLocaleString('en-IN')}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <p id="amount-help" className={invalidAmount ? 'field-error' : 'field-help'} role={invalidAmount ? 'alert' : undefined}>
                 {t(invalidAmount ? 'amountInvalid' : 'amountHint')}
               </p>
             </div>
-            <label>{t('demoRecipient')}
-              <select name="beneficiary" value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)}>
-                {Object.entries(beneficiaries).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+
+            {/* Recipient Selection */}
+            <div className="form-field">
+              <label htmlFor="beneficiary-select">{t('demoRecipient')}</label>
+              <select
+                id="beneficiary-select"
+                name="beneficiary"
+                value={beneficiary}
+                onChange={(event) => setBeneficiary(event.target.value)}
+              >
+                {Object.entries(beneficiaries).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
               </select>
-            </label>
-            <label>{t('paymentPurpose')}
-              <select name="purpose" value={purpose} onChange={(event) => setPurpose(event.target.value)}>
-                {Object.keys(purposes).map((value) => <option key={value} value={value}>{t(value as keyof typeof purposes)}</option>)}
+            </div>
+
+            {/* Purpose Selection */}
+            <div className="form-field">
+              <label htmlFor="purpose-select">{t('paymentPurpose')}</label>
+              <select
+                id="purpose-select"
+                name="purpose"
+                value={purpose}
+                onChange={(event) => setPurpose(event.target.value)}
+              >
+                {Object.keys(purposes).map((value) => (
+                  <option key={value} value={value}>{t(value as keyof typeof purposes)}</option>
+                ))}
               </select>
-            </label>
+            </div>
           </fieldset>
+
           {error && <p className="notice" role="alert">{t(error)}</p>}
           {pending && !busy && <p className="form-note">{t('retryDraft')}</p>}
+
           <div className="actions">
-            <button type="submit" className="primary" disabled={busy}>
+            <button type="submit" className="primary submit-payment-btn" disabled={busy}>
               {busy && <span className="spinner" aria-hidden="true" />}
               {t(busy ? 'checkingPayment' : pending ? 'retryRequest' : 'checkPayment')}
               {!busy && <Icon name="arrow" size={18} />}
@@ -156,21 +244,37 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountI
         </form>
       </section>
 
+      {/* Redesigned Interactive Scenario Explorer */}
       <section className="scenarios" aria-labelledby="scenarios-heading">
-        <h2 id="scenarios-heading">{t('tryScenario')}</h2>
+        <div className="scenarios-header">
+          <h2 id="scenarios-heading">{t('tryScenario')}</h2>
+          <span className="field-help">Click any real-world APP fraud pattern to test PauseGuard’s response</span>
+        </div>
         <div className="scenario-list">
           {scenarios.map((scenario) => {
-            const selected = beneficiary === scenario.beneficiary && toPaise(amount) === toPaise(scenario.amount) && purpose === scenario.purpose
+            const selected = beneficiary === scenario.beneficiary &&
+              toPaise(amount) === toPaise(scenario.amount) &&
+              purpose === scenario.purpose
             return (
-              <button className="scenario" type="button" key={scenario.title} aria-pressed={selected}
-                disabled={Boolean(pending)} onClick={() => {
+              <button
+                className={`scenario ${selected ? 'scenario-active' : ''}`}
+                type="button"
+                key={scenario.title}
+                aria-pressed={selected}
+                disabled={Boolean(pending)}
+                onClick={() => {
                   setBeneficiary(scenario.beneficiary)
                   setAmount(scenario.amount)
                   setPurpose(scenario.purpose)
                   setError(undefined)
                   setInvalidAmount(false)
-                }}>
-                <span>{t(scenario.tag)}</span><strong>{t(scenario.title)}</strong>
+                }}
+              >
+                <div className="scenario-meta">
+                  <span className="scenario-tag">{t(scenario.tag)}</span>
+                  <span className="scenario-amount">₹{Number(scenario.amount).toLocaleString('en-IN')}</span>
+                </div>
+                <strong>{t(scenario.title)}</strong>
               </button>
             )
           })}
@@ -180,7 +284,9 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountI
   )
 }
 
-export function Payer({ locale, reviewDuration, accountId, token }: { locale: Locale; reviewDuration: ReviewDuration; accountId: string; token: string }) {
+export function Payer({ locale, reviewDuration, accountId, token }: {
+  locale: Locale; reviewDuration: ReviewDuration; accountId: string; token: string
+}) {
   const [id, setId] = useState(() => {
     const previous = storageRead('sessionStorage', `${payerKey}:${accountId}`)
     return isReference(previous) ? previous : ''
@@ -193,6 +299,23 @@ export function Payer({ locale, reviewDuration, accountId, token }: { locale: Lo
     setId(next)
   }
 
-  return id ? <PaymentStatus key={id} role="payer" token={token} id={id} locale={locale} onClose={() => selectPayment('')} /> :
-    <PaymentForm locale={locale} onCreated={selectPayment} focusHeading={returning} reviewDuration={reviewDuration} accountId={accountId} token={token} />
+  return id ? (
+    <PaymentStatus
+      key={id}
+      role="payer"
+      token={token}
+      id={id}
+      locale={locale}
+      onClose={() => selectPayment('')}
+    />
+  ) : (
+    <PaymentForm
+      locale={locale}
+      onCreated={selectPayment}
+      focusHeading={returning}
+      reviewDuration={reviewDuration}
+      accountId={accountId}
+      token={token}
+    />
+  )
 }

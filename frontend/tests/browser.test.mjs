@@ -311,10 +311,10 @@ test('new payer onboards on mobile, edits profile, and signs back in', { timeout
   await payer.getByRole('alert').filter({ hasText: 'fictional full name' }).waitFor()
   assert.equal(await payer.getByLabel('Full name').evaluate((input) => input === document.activeElement), true)
   await payer.getByLabel('Full name').fill('Mobile Demo')
-  await payer.getByLabel('Email or mobile').fill('mobile@gmail.com')
+  await payer.getByLabel('Email or mobile').fill('invalid-contact')
   await payer.getByRole('button', { name: 'Continue' }).click()
-  await payer.getByRole('alert').filter({ hasText: 'fictional .test email' }).waitFor()
-  const contact = `mobile-${crypto.randomUUID()}@fixture.test`
+  await payer.getByRole('alert').filter({ hasText: 'valid email address' }).waitFor()
+  const contact = `mobile-${crypto.randomUUID()}@gmail.com`
   await payer.getByLabel('Email or mobile').fill(contact)
   await payer.getByRole('button', { name: 'Continue' }).click()
   await payer.getByLabel('Account type').selectOption('small_business')

@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createDemoAccounts } from './accounts.ts'
 import { MockError, readBody, respond } from './http.ts'
 import { demoAccountPath } from '../src/types/account.ts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { beneficiaries, purposes } from './scenarios.ts'
 import { defaultReviewDuration, demoReviewDurationHeader, parseReviewDuration } from './reviewPreference.ts'
 import type { ReviewDuration } from './reviewPreference.ts'
@@ -18,6 +18,24 @@ interface PaymentRecord {
   enrollmentId?: string
   reviewDuration?: ReviewDuration
   confirmationKey?: string
+}
+
+interface MockAuditEntry {
+  seq: number
+  paymentId: string
+  payerId: string
+  actorRole: string
+  event: string
+  fromStatus: Status | null
+  toStatus: Status
+  version: number
+  timestamp: string
+  prevHash: string
+  hash: string
+}
+
+function hashAuditEntry(entry: Omit<MockAuditEntry, 'hash' | 'payerId'>): string {
+  return createHash('sha256').update(JSON.stringify(entry)).digest('hex')
 }
 
 function transition(record: PaymentRecord, status: Status) {
@@ -59,6 +77,36 @@ export function createMockApi(clock: () => number = Date.now) {
   const accounts = createDemoAccounts(clock)
   const payments = new Map<string, PaymentRecord>()
   const creations = new Map<string, PaymentRecord>()
+  const auditLog: MockAuditEntry[] = []
+
+  function recordAudit(record: PaymentRecord, actorRole: string, event: string, fromStatus: Status | null) {
+    const seq = auditLog.length + 1
+    const prevHash = auditLog.at(-1)?.hash ?? 'GENESIS'
+    const base = {
+      seq,
+      paymentId: record.payment.id,
+      actorRole,
+      event,
+      fromStatus,
+      toStatus: record.payment.status,
+      version: record.payment.version,
+      timestamp: new Date(clock()).toISOString(),
+      prevHash,
+    }
+    auditLog.push({ ...base, payerId: record.payer, hash: hashAuditEntry(base) })
+  }
+
+  function verifyAuditChain() {
+    let expectedPrev = 'GENESIS'
+    for (const entry of auditLog) {
+      const { hash, payerId: _payerId, ...base } = entry
+      if (entry.prevHash !== expectedPrev || hashAuditEntry(base) !== hash) {
+        return { valid: false, total_events: auditLog.length, head_hash: auditLog.at(-1)?.hash ?? 'GENESIS', checked_at: new Date(clock()).toISOString() }
+      }
+      expectedPrev = hash
+    }
+    return { valid: true, total_events: auditLog.length, head_hash: expectedPrev, checked_at: new Date(clock()).toISOString() }
+  }
 
   function assigned(record: PaymentRecord) {
     return accounts.isEnrolled(record.enrollmentId, record.payer, record.guardian)
@@ -68,6 +116,7 @@ export function createMockApi(clock: () => number = Date.now) {
     const { status, guardian_deadline } = record.payment
     if (status === 'AWAITING_GUARDIAN' && (!assigned(record) || (guardian_deadline && clock() >= Date.parse(guardian_deadline)))) {
       transition(record, 'AWAITING_FALLBACK_REVIEW')
+      recordAudit(record, 'system', 'GUARDIAN_WINDOW_EXPIRED', status)
     }
   }
 
@@ -89,6 +138,29 @@ export function createMockApi(clock: () => number = Date.now) {
       if (method === 'GET' && route === '/health') return { status: 'ok', mode: 'mock' }
       if (path.startsWith(`${demoAccountPath}/`)) {
         const demoRoute = path.slice(demoAccountPath.length)
+        if (demoRoute === '/admin/test-payer' && method === 'POST') {
+          const { profile: actor } = accounts.authenticate(request.headers.authorization)
+          if (actor.role !== 'admin') throw new MockError(403, 'Admin authorization required.')
+          const body = await readBody(request).catch(() => ({} as Record<string, unknown>))
+          const safeLock = typeof body.safeLock === 'boolean' ? body.safeLock : undefined
+          return accounts.issueSyntheticPayerSession(actor, safeLock)
+        }
+        if (demoRoute === '/admin/audit' && method === 'GET') {
+          const { profile: actor } = accounts.authenticate(request.headers.authorization)
+          if (actor.role !== 'admin') throw new MockError(403, 'Admin authorization required.')
+          const filterId = url.searchParams.get('paymentId')
+          const syntheticPayments = [...payments.values()]
+            .filter((record) => record.payer === accounts.syntheticPayerId && (!filterId || record.payment.id === filterId))
+            .map((record) => {
+              expire(record)
+              return record.payment
+            })
+            .reverse()
+          const events = auditLog
+            .filter((entry) => entry.payerId === accounts.syntheticPayerId && (!filterId || entry.paymentId === filterId))
+            .map(({ payerId: _payerId, ...rest }) => rest)
+          return { payments: syntheticPayments, events }
+        }
         if (demoRoute !== '/reviews' || method !== 'GET') return accounts.handle(demoRoute, request)
         const { profile } = accounts.authenticate(request.headers.authorization)
         if (profile.role !== 'guardian') throw new MockError(403, 'Only a guardian can open review alerts.')
@@ -101,6 +173,11 @@ export function createMockApi(clock: () => number = Date.now) {
         return { id: found?.payment.id ?? null }
       }
       const { profile: actor } = accounts.authenticate(request.headers.authorization)
+
+      if (method === 'GET' && route === '/audit/verify') {
+        if (actor.role !== 'admin') throw new MockError(403, 'Admin authorization required.')
+        return verifyAuditChain()
+      }
 
       if (method === 'POST' && route === '/payments') {
         if (actor.role !== 'payer') throw new MockError(403, 'This demo role cannot start payments.')
@@ -145,6 +222,7 @@ export function createMockApi(clock: () => number = Date.now) {
         }
         payments.set(payment.id, record)
         creations.set(key, record)
+        recordAudit(record, actor.role, payer.safeLock ? 'PAYMENT_BLOCKED_SAFELOCK' : 'PAYMENT_CREATED', 'CREATED')
         return snapshot(record, actor.role)
       }
 
@@ -171,7 +249,9 @@ export function createMockApi(clock: () => number = Date.now) {
           throw new MockError(409, 'This guardian review has closed. Refresh its status.')
         }
         if (decision !== 'approve' && decision !== 'reject') throw new MockError(422, 'Choose a review decision.')
+        const previous = payment.status
         transition(record, decision === 'approve' ? 'READY_TO_EXECUTE' : 'REJECTED')
+        recordAudit(record, actor.role, decision === 'approve' ? 'GUARDIAN_APPROVED' : 'GUARDIAN_REJECTED', previous)
         return guardianView(payment)
       }
       if (actor.id !== record.payer) throw new MockError(403, 'Only the payer can take this action.')
@@ -182,21 +262,29 @@ export function createMockApi(clock: () => number = Date.now) {
         if (payment.status === 'EXECUTED' && idempotency_key === record.confirmationKey) return payment
         if (payment.status !== 'READY_TO_EXECUTE') throw new MockError(409, 'This payment is unavailable for confirmation.')
         if (payer.safeLock || (record.enrollmentId && !assigned(record))) {
+          const previous = payment.status
           transition(record, 'REJECTED')
+          recordAudit(record, actor.role, 'CONFIRM_REJECTED_SAFELOCK_OR_REVOKE', previous)
           return payment
         }
         record.confirmationKey = idempotency_key
+        const previous = payment.status
         transition(record, 'EXECUTED')
+        recordAudit(record, actor.role, 'PAYMENT_CONFIRMED_EXECUTED', previous)
         return payment
       }
       expire(record)
       if (action === 'warning/acknowledge' && payment.status === 'AWAITING_WARNING') {
+        const previous = payment.status
         transition(record, 'READY_TO_EXECUTE')
+        recordAudit(record, actor.role, 'WARNING_ACKNOWLEDGED', previous)
         return payment
       }
       if (action === 'fallback/activate' && payment.status === 'AWAITING_FALLBACK_REVIEW') return payment
       if (action === 'cancel' && payment.status !== 'CREATED' && !terminalStatuses.has(payment.status)) {
+        const previous = payment.status
         transition(record, 'CANCELLED')
+        recordAudit(record, actor.role, 'PAYMENT_CANCELLED', previous)
         return payment
       }
       throw new MockError(409, 'This action is unavailable for the current payment status.')

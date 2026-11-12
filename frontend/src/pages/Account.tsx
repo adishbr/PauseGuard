@@ -56,55 +56,128 @@ export function Account({ profile, token, saved }: { profile: DemoProfile; token
   }
 
   return (
-    <section className="card account-card">
-      <p className="eyebrow">Account settings</p>
-      <h2>Profile</h2>
-      <p className="form-note">Use fictional details. Account categories and supplier preferences are self-declared.</p>
+    <section className="card account-card profile-settings-card">
+      <div className="card-header">
+        <div className="symbol mint"><Icon name="sliders" /></div>
+        <div>
+          <p className="eyebrow">Account Settings</p>
+          <h2>Profile</h2>
+        </div>
+      </div>
+      <p className="form-note">Use fictional or realistic details. Account categories, suppliers and threshold settings are self-declared.</p>
+
+      {/* Safe-Lock Hero Panel (for Payers) */}
+      {payer && (
+        <div className={`safety-setting safelock-card ${profile.safeLock ? 'safelock-on' : 'safelock-off'}`}>
+          <div className="safelock-header">
+            <div className="safelock-icon-symbol">
+              <Icon name={profile.safeLock ? 'lock' : 'unlock'} size={24} />
+            </div>
+            <div>
+              <h3><Icon name="lock" size={19} /> Safe-Lock is {profile.safeLock ? 'on' : 'off'}</h3>
+              <p className="field-help">Safe-Lock blocks simulated outgoing payments, including requests awaiting your final confirmation.</p>
+            </div>
+          </div>
+          <button
+            className={`secondary safelock-action-btn ${profile.safeLock ? 'btn-unlock' : 'btn-lock'}`}
+            disabled={busy}
+            type="button"
+            onClick={() => void persist({ safeLock: !profile.safeLock })}
+          >
+            {profile.safeLock ? 'Turn off Safe-Lock' : 'Turn on Safe-Lock'}
+          </button>
+        </div>
+      )}
+
       <form className="account-form" onSubmit={submit} noValidate>
         <fieldset disabled={busy}>
           <legend>About you</legend>
           <div className="account-fields">
-            <label>Full name<input required maxLength={64} value={fields.name} onChange={(e) => update('name', e.target.value)} /></label>
-            <label>Email or mobile<input required maxLength={90} value={fields.contact} onChange={(e) => update('contact', e.target.value)} /></label>
-            <label>Preferred language<select value={fields.language} onChange={(e) => update('language', e.target.value as Locale)}>
-              {Object.entries(languages).map(([key, value]) => <option key={key} value={key} lang={key}>{value.label}</option>)}
-            </select></label>
-            {payer && <label>Account type<select value={fields.category} onChange={(e) => update('category', e.target.value as AccountCategory)}>
-              {Object.entries(accountCategories).map(([key, value]) => <option key={key} value={key}>{value}</option>)}
-            </select></label>}
+            <label>Full name
+              <input required maxLength={64} value={fields.name} onChange={(e) => update('name', e.target.value)} />
+            </label>
+            <label>Email or mobile
+              <input
+                required
+                maxLength={90}
+                value={fields.contact}
+                placeholder="name@gmail.com or 9876543210"
+                aria-describedby="contact-verification-status"
+                onChange={(e) => update('contact', e.target.value)}
+              />
+            </label>
+            <label>Preferred language
+              <select value={fields.language} onChange={(e) => update('language', e.target.value as Locale)}>
+                {Object.entries(languages).map(([key, value]) => <option key={key} value={key} lang={key}>{value.label}</option>)}
+              </select>
+            </label>
+            {payer && (
+              <label>Account type
+                <select value={fields.category} onChange={(e) => update('category', e.target.value as AccountCategory)}>
+                  {Object.entries(accountCategories).map(([key, value]) => <option key={key} value={key}>{value}</option>)}
+                </select>
+              </label>
+            )}
           </div>
-          <label className="check-row"><input type="checkbox" checked={fields.largeText} onChange={(e) => update('largeText', e.target.checked)} />Use larger text</label>
+          <p id="contact-verification-status" className="field-help">
+            <span className="pill neutral">Demo Sandbox</span> Contact ownership is unverified. Real OTP and email verification will connect to production IAM.
+          </p>
+          <label className="check-row">
+            <input type="checkbox" checked={fields.largeText} onChange={(e) => update('largeText', e.target.checked)} />
+            Use larger text
+          </label>
         </fieldset>
-        {payer && fields.category !== 'personal' && <fieldset disabled={busy}>
-          <legend>Professional and business preferences</legend>
-          <div className="account-fields">
-            <label>Organization (optional)<input maxLength={80} value={fields.organization} onChange={(e) => update('organization', e.target.value)} /></label>
-            <label>Recurring supplier (optional)<select value={fields.recurringSupplier} onChange={(e) => update('recurringSupplier', e.target.value)}>
-              <option value="">Choose later</option>
-              {Object.entries(beneficiaries).filter(([key]) => key !== 'recipient_flagged').map(([key, value]) => <option key={key} value={key}>{value}</option>)}
-            </select></label>
-          </div>
-          <p className="field-help">Payment safety checks still apply to recurring suppliers.</p>
-        </fieldset>}
-        {payer && <fieldset disabled={busy}>
-          <legend>Notifications and consent</legend>
-          <label>Personal payment alert threshold (INR, optional)<input inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} /></label>
-          <p className="field-help">The threshold affects your alert preferences. Payment safety policy is evaluated separately.</p>
-          <label className="check-row"><input type="checkbox" checked={fields.notifications} onChange={(e) => update('notifications', e.target.checked)} />Allow optional notifications</label>
-          <div className="account-fields">
-            <label>Quiet hours start (optional)<input type="time" value={fields.quietStart} onChange={(e) => update('quietStart', e.target.value)} /></label>
-            <label>Quiet hours end (optional)<input type="time" value={fields.quietEnd} onChange={(e) => update('quietEnd', e.target.value)} /></label>
-          </div>
-          <label className="check-row"><input type="checkbox" checked={fields.callConsent} onChange={(e) => update('callConsent', e.target.checked)} />I opt in to simulated guardian call preferences</label>
-          <p className="field-help">Delivery and quiet-hours scheduling are planned provider integrations.</p>
-        </fieldset>}
+
+        {payer && fields.category !== 'personal' && (
+          <fieldset disabled={busy}>
+            <legend>Professional and business preferences</legend>
+            <div className="account-fields">
+              <label>Organization (optional)
+                <input maxLength={80} value={fields.organization} onChange={(e) => update('organization', e.target.value)} />
+              </label>
+              <label>Recurring supplier (optional)
+                <select value={fields.recurringSupplier} onChange={(e) => update('recurringSupplier', e.target.value)}>
+                  <option value="">Choose later</option>
+                  {Object.entries(beneficiaries).filter(([key]) => key !== 'recipient_flagged').map(([key, value]) => (
+                    <option key={key} value={key}>{value}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="field-help">Payment safety checks still apply to recurring suppliers.</p>
+          </fieldset>
+        )}
+
+        {payer && (
+          <fieldset disabled={busy}>
+            <legend>Notifications and consent</legend>
+            <label>Personal payment alert threshold (INR, optional)
+              <input inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+            </label>
+            <p className="field-help">The threshold affects your alert preferences. Payment safety policy is evaluated separately.</p>
+            <label className="check-row">
+              <input type="checkbox" checked={fields.notifications} onChange={(e) => update('notifications', e.target.checked)} />
+              Allow optional notifications
+            </label>
+            <div className="account-fields">
+              <label>Quiet hours start (optional)
+                <input type="time" value={fields.quietStart} onChange={(e) => update('quietStart', e.target.value)} />
+              </label>
+              <label>Quiet hours end (optional)
+                <input type="time" value={fields.quietEnd} onChange={(e) => update('quietEnd', e.target.value)} />
+              </label>
+            </div>
+            <label className="check-row">
+              <input type="checkbox" checked={fields.callConsent} onChange={(e) => update('callConsent', e.target.checked)} />
+              I opt in to simulated guardian call preferences
+            </label>
+            <p className="field-help">Delivery and quiet-hours scheduling are planned provider integrations.</p>
+          </fieldset>
+        )}
+
         <button className="primary" disabled={busy} type="submit">{busy ? 'Saving…' : 'Save profile'}</button>
       </form>
-      {payer && <div className="safety-setting">
-        <h3><Icon name="lock" size={19} /> Safe-Lock is {profile.safeLock ? 'on' : 'off'}</h3>
-        <p className="field-help">Safe-Lock blocks simulated outgoing payments, including requests awaiting your final confirmation.</p>
-        <button className="secondary" disabled={busy} type="button" onClick={() => void persist({ safeLock: !profile.safeLock })}>{profile.safeLock ? 'Turn off Safe-Lock' : 'Turn on Safe-Lock'}</button>
-      </div>}
+
       {notice && <p className={notice.error ? 'notice' : 'form-note'} role={notice.error ? 'alert' : 'status'}>{notice.message}</p>}
     </section>
   )

@@ -6,6 +6,7 @@ import { Icon } from './components/Icon.tsx'
 import { isLocale, languages, translator } from './locales/messages.ts'
 import type { Locale } from './locales/messages.ts'
 import { Account } from './pages/Account.tsx'
+import { Admin, AdminLogin } from './pages/Admin.tsx'
 import { Auth } from './pages/Auth.tsx'
 import { Enrollment } from './pages/Enrollment.tsx'
 import { Help } from './pages/Help.tsx'
@@ -25,12 +26,20 @@ function dashboardDestination(dashboard: string) {
 }
 
 function App() {
-  const [path, setPath] = useState(() => window.location.pathname.replace(/\/$/, '') || '/')
+  const [path, setPath] = useState(() => {
+    const current = window.location.pathname.replace(/\/$/, '') || '/'
+    if (current === '/admin' && !savedSession('admin')) {
+      window.history.replaceState(null, '', '/admin/login')
+      return '/admin/login'
+    }
+    return current
+  })
   const guardian = path === '/guardian' || path.startsWith('/guardian/')
-  const role = guardian ? 'guardian' : 'payer'
-  const base = guardian ? '/guardian' : ''
+  const adminPath = path === '/admin' || path.startsWith('/admin/')
+  const role = guardian ? 'guardian' : adminPath ? 'admin' : 'payer'
+  const base = guardian ? '/guardian' : adminPath ? '/admin' : ''
   const dashboard = base || '/'
-  const shell = path === '/analyst' || path === '/admin'
+  const shell = path === '/analyst'
   const [token, setToken] = useState(() => shell ? '' : savedSession(role))
   const [session, setSession] = useState<DemoSession>()
   const [expired, setExpired] = useState(false)
@@ -49,7 +58,7 @@ function App() {
     parseReviewDuration(storageRead('localStorage', durationKey) ||
       (profile?.sample ? storageRead('localStorage', protectionKey) : '')) ?? defaultReviewDuration
   const paymentPage = path === dashboard
-  const showProtection = !guardian && (paymentPage || path === '/profile')
+  const showProtection = !guardian && !adminPath && (paymentPage || path === '/profile')
 
   function changeLocale(next: Locale) {
     storageWrite('localStorage', languageKey, next)
@@ -63,6 +72,7 @@ function App() {
   }
 
   function enter(next: DemoSession) {
+    if (next.profile.role !== role) return
     saveSession(role, next.token)
     setSession(next)
     setToken(next.token)
@@ -89,8 +99,9 @@ function App() {
       setSession(undefined)
       setSessionError('')
       setExpired(false)
-      window.history.replaceState(null, '', dashboard)
-      setPath(dashboard)
+      const destination = adminPath ? '/admin/login' : dashboard
+      window.history.replaceState(null, '', destination)
+      setPath(destination)
     } catch (error) {
       if (!(error instanceof AccountError && error.status === 401)) setSessionError('Sign-out could not reach the demo service. Try again.')
     } finally {
@@ -145,94 +156,184 @@ function App() {
     document.documentElement.lang = locale
   }, [locale])
 
+  const authRole = guardian ? 'guardian' : 'payer'
+
   return (
     <div className={profile?.largeText ? 'app large-text' : 'app'}>
       <a className="skip-link" href="#main">{t('skip')}</a>
       <header className="site-header">
         <div className="frame topbar">
-          <a href={dashboard} className="brand" aria-label={guardian ? 'PauseGuard guardian home' : t('payerHome')}>
-            <span className="brand-mark"><Icon name="shield" /></span>
-            <span>Pause<span>Guard</span></span>
-          </a>
+          <div className="topbar-brand-group">
+            <a href={dashboard} className="brand" aria-label={guardian ? 'PauseGuard guardian home' : adminPath ? 'PauseGuard admin home' : t('payerHome')}>
+              <span className="brand-mark"><Icon name="shield" /></span>
+              <span>Pause<span>Guard</span></span>
+            </a>
+            <span className="platform-tag">FinTech Defense V2</span>
+          </div>
+
           <div className="topbar-controls">
+            {profile && (
+              <div className="user-persona-chip">
+                <span className="persona-avatar">{profile.name.charAt(0).toUpperCase()}</span>
+                <div className="persona-details">
+                  <span className="persona-name">{profile.name}</span>
+                  <span className="persona-meta">
+                    {profile.role === 'admin' ? 'Admin' : guardian ? 'Guardian' : profile.category.replace('_', ' ')}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {!guardian && !adminPath && profile?.safeLock && (
+              <span className="safelock-indicator active" title="Safe-Lock is Active (Outgoing transfers blocked)">
+                <Icon name="lock" size={13} />
+                <span>Safe-Lock ON</span>
+              </span>
+            )}
+
             <span className="demo-badge"><span />{t('simulation')}</span>
-            <label className="locale-control">
-              <span className="sr-only">{t('language')}</span>
-              <select value={locale} onChange={(event) => {
-                const next = event.target.value
-                if (!isLocale(next)) return
-                changeLocale(next)
-              }}>
-                {Object.entries(languages).map(([code, language]) => (
-                  <option key={code} value={code} lang={code}>{language.label}</option>
-                ))}
-              </select>
-            </label>
+
+            {!adminPath && (
+              <label className="locale-control">
+                <span className="sr-only">{t('language')}</span>
+                <select value={locale} onChange={(event) => {
+                  const next = event.target.value
+                  if (!isLocale(next)) return
+                  changeLocale(next)
+                }}>
+                  {Object.entries(languages).map(([code, language]) => (
+                    <option key={code} value={code} lang={code}>{language.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
         </div>
-        {profile && <nav className="frame account-nav" aria-label="Account navigation">
-          <a href={dashboard} aria-current={paymentPage ? 'page' : undefined}>{guardian ? 'Reviews' : 'Dashboard'}</a>
-          <a href={`${base}/profile`} aria-current={path.endsWith('/profile') ? 'page' : undefined}>Profile</a>
-          <a href={`${base}/enrollment`} aria-current={path.endsWith('/enrollment') ? 'page' : undefined}>{guardian ? 'Invitations' : 'Guardians'}</a>
-          <a href={`${base}/help`} aria-current={path.endsWith('/help') ? 'page' : undefined}>Help & recovery</a>
-          <button className="text-button" disabled={signingOut} type="button" onClick={() => void logout()}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
-        </nav>}
+
+        {profile && (
+          <nav className="frame account-nav" aria-label="Account navigation">
+            <div className="nav-primary-links">
+              <a href={dashboard} aria-current={paymentPage ? 'page' : undefined}>
+                <Icon name={adminPath ? 'shieldAlert' : guardian ? 'users' : 'activity'} size={16} />
+                <span>{adminPath ? 'Testing' : guardian ? 'Reviews' : 'Dashboard'}</span>
+              </a>
+              {!adminPath && (
+                <>
+                  <a href={`${base}/profile`} aria-current={path.endsWith('/profile') ? 'page' : undefined}>
+                    <Icon name="sliders" size={16} />
+                    <span>Profile</span>
+                  </a>
+                  <a href={`${base}/enrollment`} aria-current={path.endsWith('/enrollment') ? 'page' : undefined}>
+                    <Icon name="users" size={16} />
+                    <span>{guardian ? 'Invitations' : 'Guardians'}</span>
+                  </a>
+                  <a href={`${base}/help`} aria-current={path.endsWith('/help') ? 'page' : undefined}>
+                    <Icon name="fileText" size={16} />
+                    <span>Help &amp; recovery</span>
+                  </a>
+                </>
+              )}
+            </div>
+
+            <div className="nav-utility-group">
+              <button className="text-button signout-btn" disabled={signingOut} type="button" onClick={() => void logout()}>
+                {signingOut ? 'Signing out…' : 'Sign out'}
+              </button>
+            </div>
+          </nav>
+        )}
       </header>
 
       <main id="main" className="frame" tabIndex={-1}>
-        {sessionError && <div className="notice" role="alert">
-          <p>{sessionError}</p>
-          {!session && <button className="secondary" type="button" onClick={() => { setSessionError(''); setRetry((n) => n + 1) }}>Retry session</button>}
-        </div>}
-        {shell ? <section className="card account-card workspace-card">
-          <p className="eyebrow">Integration shell</p>
-          <h1>{path === '/analyst' ? 'Analyst interface' : 'Admin interface'}</h1>
-          <p className="form-note">Access and data will come from the team’s authorized backend. The local demo supports payer and guardian sessions.</p>
-          <a className="secondary" href="/">Return to PauseGuard</a>
-        </section> : !session ? token ? (
-          !sessionError && <p className="form-note" role="status">Checking your demo session…</p>
-        ) : <Auth key={path} path={path} role={role} locale={locale} onSession={enter} expired={expired} /> : <>
-        {paymentPage && <div className="intro">
-          <div className="intro-copy">
-            <p className="eyebrow"><span className="line" />{t(guardian ? 'guardianEyebrow' : 'payerEyebrow')}</p>
-            <h1>{t(guardian ? 'guardianHero' : 'payerHero')} <em>{t(guardian ? 'guardianAccent' : 'payerAccent')}</em></h1>
-            <p>{t(guardian ? 'guardianIntro' : 'payerIntro')}</p>
+        {sessionError && (
+          <div className="notice" role="alert">
+            <p>{sessionError}</p>
+            {!session && <button className="secondary" type="button" onClick={() => { setSessionError(''); setRetry((n) => n + 1) }}>Retry session</button>}
           </div>
-          <div className="intro-mark" aria-hidden="true"><Icon name="shield" size={53} /></div>
-        </div>}
+        )}
 
-        <div className={paymentPage ? 'workspace' : 'workspace account-workspace'}>
-          <div className="main-column">
-            {showProtection && <a className="mobile-settings-link" href="#payment-protection-settings">{t('protectionSettings')} <Icon name="arrow" size={16} /></a>}
-            {path.endsWith('/profile') ? <Account key={session.profile.id} token={token} profile={session.profile} saved={saveProfile} /> :
-              path.endsWith('/enrollment') ? <Enrollment key={session.profile.id} token={token} profile={session.profile} /> :
-              path.endsWith('/help') ? <Help payerId={guardian ? undefined : session.profile.id} /> :
-              guardian ? <Guardian key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} /> :
-              <Payer key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} reviewDuration={reviewDuration} />}
-          </div>
-          <aside className="side-column" aria-label={t('about')}>
-            {showProtection && <ProtectionSettings key={session.profile.id} saved={reviewDuration} save={saveReviewDuration} t={t} />}
-            <section className="card side-card">
-              <div className="symbol mint"><Icon name="users" /></div>
-              <h2>{t('twoWindows')}</h2>
-              <p>{t(guardian ? 'guardianGuide' : 'payerGuide')}</p>
-              <a className="secondary" href={guardian ? '/' : '/guardian'} target="_blank" rel="noopener">
-                {t(guardian ? 'openPayer' : 'openGuardian')} <Icon name="external" size={18} />
-              </a>
-            </section>
-            <section className="card side-card privacy-card">
-              <div className="symbol"><Icon name="lock" /></div>
-              <h2>{t('privacy')}</h2>
-              <p>{session.profile.sample ? t('privacyNote') : 'Guardian enrollment requires explicit acceptance. Payment details stay with the payer.'}</p>
-              <p className="field-help">Signed in as {session.profile.name} · {guardian ? 'Guardian' : 'Payer'} demo</p>
-            </section>
-          </aside>
-        </div>
-        </>}
+        {shell ? (
+          <section className="card account-card workspace-card">
+            <p className="eyebrow">Integration shell</p>
+            <h1>Analyst interface</h1>
+            <p className="form-note">Access and data will come from the team’s authorized backend. The local demo supports payer and guardian sessions.</p>
+            <a className="secondary" href="/">Return to PauseGuard</a>
+          </section>
+        ) : adminPath ? (
+          !session ? token ? (
+            !sessionError && <p className="form-note" role="status">Checking your admin session…</p>
+          ) : (
+            <AdminLogin onSession={enter} expired={expired} registrationBlocked={path === '/admin/signup'} />
+          ) : (
+            <Admin key={session.profile.id} token={token} accountId={session.profile.id} />
+          )
+        ) : !session ? token ? (
+          !sessionError && <p className="form-note" role="status">Checking your demo session…</p>
+        ) : (
+          <Auth key={path} path={path} role={authRole} locale={locale} onSession={enter} expired={expired} />
+        ) : (
+          <>
+            {paymentPage && (
+              <div className="intro">
+                <div className="intro-copy">
+                  <p className="eyebrow"><span className="line" />{t(guardian ? 'guardianEyebrow' : 'payerEyebrow')}</p>
+                  <h1>{t(guardian ? 'guardianHero' : 'payerHero')} <em>{t(guardian ? 'guardianAccent' : 'payerAccent')}</em></h1>
+                  <p>{t(guardian ? 'guardianIntro' : 'payerIntro')}</p>
+                </div>
+                <div className="intro-mark" aria-hidden="true"><Icon name="shield" size={53} /></div>
+              </div>
+            )}
+
+            <div className={paymentPage ? 'workspace' : 'workspace account-workspace'}>
+              <div className="main-column">
+                {showProtection && <a className="mobile-settings-link" href="#payment-protection-settings">{t('protectionSettings')} <Icon name="arrow" size={16} /></a>}
+                {path.endsWith('/profile') ? <Account key={session.profile.id} token={token} profile={session.profile} saved={saveProfile} /> :
+                  path.endsWith('/enrollment') ? <Enrollment key={session.profile.id} token={token} profile={session.profile} /> :
+                  path.endsWith('/help') ? <Help payerId={guardian ? undefined : session.profile.id} /> :
+                  guardian ? <Guardian key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} /> :
+                  <Payer key={session.profile.id} token={token} accountId={session.profile.id} locale={locale} reviewDuration={reviewDuration} />}
+              </div>
+
+              <aside className="side-column" aria-label={t('about')}>
+                {showProtection && <ProtectionSettings key={session.profile.id} saved={reviewDuration} save={saveReviewDuration} t={t} />}
+
+                <section className="card side-card sync-card">
+                  <div className="symbol mint"><Icon name="users" /></div>
+                  <h2>{t('twoWindows')}</h2>
+                  <p>{t(guardian ? 'guardianGuide' : 'payerGuide')}</p>
+                  <div className="two-window-telemetry">
+                    <div className="sync-status-row">
+                      <span className="pulse-dot-small" />
+                      <span>WebSocket simulation sync active</span>
+                    </div>
+                  </div>
+                  <a className="secondary" href={guardian ? '/' : '/guardian'} target="_blank" rel="noopener">
+                    {t(guardian ? 'openPayer' : 'openGuardian')} <Icon name="external" size={18} />
+                  </a>
+                </section>
+
+                <section className="card side-card privacy-card">
+                  <div className="symbol"><Icon name="lock" /></div>
+                  <h2>{t('privacy')}</h2>
+                  <p>{session.profile.sample ? t('privacyNote') : 'Guardian enrollment requires explicit acceptance. Payment details stay with the payer.'}</p>
+                  <div className="side-card-footer">
+                    <span className="pill neutral">
+                      Signed in as {session.profile.name} · {guardian ? 'Guardian' : 'Payer'} demo
+                    </span>
+                  </div>
+                </section>
+              </aside>
+            </div>
+          </>
+        )}
       </main>
 
       <footer className="frame site-footer">
-        <span><Icon name="shield" size={16} /> PauseGuard V2</span>
+        <div className="footer-left">
+          <span><Icon name="shield" size={16} /> PauseGuard V2</span>
+          <span className="footer-divider">·</span>
+          <span>COLOSSUS 3.0 FinTech Security</span>
+        </div>
         <span>{t('footer')}</span>
       </footer>
     </div>

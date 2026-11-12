@@ -1,14 +1,17 @@
 import type { IncomingMessage } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { accountCategories, demoContact, demoName, relationships } from '../src/types/account.ts'
-import type { DemoProfile, DemoSession, EnrollmentView, Relationship } from '../src/types/account.ts'
-import type { Role } from '../src/types/payment.ts'
+import { accountCategories, canonicalContact, demoContact, demoName, relationships } from '../src/types/account.ts'
+import type { AppRole, DemoProfile, DemoSession, EnrollmentView, Relationship } from '../src/types/account.ts'
 import { MockError, readBody } from './http.ts'
 import { beneficiaries } from './scenarios.ts'
 
 type Invitation = EnrollmentView & { payerId: string; guardianId?: string; contact: string }
 
-function profile(id: string, role: Role, name: string, contact: string, sample = false): DemoProfile {
+function matchesContact(a: string, b: string): boolean {
+  return canonicalContact(a) === canonicalContact(b)
+}
+
+function profile(id: string, role: AppRole, name: string, contact: string, sample = false): DemoProfile {
   return {
     id, role, name, contact, sample, category: 'personal', language: 'en', largeText: false,
     organization: '', recurringSupplier: '', thresholdPaise: sample && role === 'payer' ? 5_500_000 : null,
@@ -23,7 +26,7 @@ function bad(message: string): never {
 function updateProfile(current: DemoProfile, input: Record<string, unknown>): DemoProfile {
   const next = { ...current }
   if ('name' in input) next.name = demoName(input.name) ?? bad('Enter a fictional full name.')
-  if ('contact' in input) next.contact = demoContact(input.contact) ?? bad('Use a .test email or a demo mobile starting with 00000.')
+  if ('contact' in input) next.contact = demoContact(input.contact) ?? bad('Enter a valid email address or 10-digit Indian mobile number.')
   if ('language' in input) {
     const value = input.language
     if (value !== 'en' && value !== 'kn' && value !== 'hi' && value !== 'te') bad('Choose a supported language.')
@@ -33,7 +36,7 @@ function updateProfile(current: DemoProfile, input: Record<string, unknown>): De
     if (typeof input.largeText !== 'boolean') bad('Choose an accessibility preference.')
     next.largeText = input.largeText
   }
-  if (current.role === 'guardian') return next
+  if (current.role === 'guardian' || current.role === 'admin') return next
   if ('category' in input) {
     if (typeof input.category !== 'string' || !Object.hasOwn(accountCategories, input.category)) bad('Choose an account category.')
     next.category = input.category as DemoProfile['category']
@@ -53,8 +56,9 @@ function updateProfile(current: DemoProfile, input: Record<string, unknown>): De
   }
   if ('thresholdPaise' in input) {
     const value = input.thresholdPaise
-    if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1)) bad('Enter a positive payment alert threshold.')
-    next.thresholdPaise = value
+    if (value === null) next.thresholdPaise = null
+    else if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) bad('Enter a positive payment alert threshold.')
+    else next.thresholdPaise = value
   }
   for (const key of ['notifications', 'callConsent', 'safeLock'] as const) {
     if (!(key in input)) continue
@@ -76,7 +80,21 @@ function updateProfile(current: DemoProfile, input: Record<string, unknown>): De
 export function createDemoAccounts(clock: () => number) {
   const samplePayer = profile('demo-payer', 'payer', 'Asha Demo', 'asha@pauseguard.test', true)
   const sampleGuardian = profile('demo-guardian', 'guardian', 'Ravi Demo', 'ravi@pauseguard.test', true)
-  const profiles = new Map([[samplePayer.id, samplePayer], [sampleGuardian.id, sampleGuardian]])
+  const sampleAdmin: DemoProfile = {
+    id: 'demo-admin', role: 'admin', name: 'Admin Demo', contact: 'admin@pauseguard.test',
+    sample: true, category: 'personal', language: 'en', largeText: false,
+    organization: '', recurringSupplier: '', thresholdPaise: null,
+    notifications: false, quietStart: '', quietEnd: '', callConsent: false, safeLock: false,
+  }
+  const syntheticTestPayer: DemoProfile = profile(
+    'admin-synthetic-payer', 'payer', 'Admin Sandbox Payer', 'sandbox-payer@pauseguard.test', true,
+  )
+  const profiles = new Map([
+    [samplePayer.id, samplePayer],
+    [sampleGuardian.id, sampleGuardian],
+    [sampleAdmin.id, sampleAdmin],
+    [syntheticTestPayer.id, syntheticTestPayer],
+  ])
   const sessions = new Map<string, { actorId: string; expiresAt: number }>()
   const invitations = new Map<string, Invitation>([[
     'sample-guardian', {
@@ -116,7 +134,7 @@ export function createDemoAccounts(clock: () => number) {
 
   function isInviteFor(guardian: DemoProfile, invite: Invitation) {
     return invite.guardianId ? invite.guardianId === guardian.id :
-      !guardian.sample && invite.status === 'Pending' && invite.contact === guardian.contact
+      !guardian.sample && invite.status === 'Pending' && matchesContact(invite.contact, guardian.contact)
   }
 
   function listEnrollments(actor: DemoProfile): EnrollmentView[] {
@@ -129,7 +147,7 @@ export function createDemoAccounts(clock: () => number) {
   }
 
   function contactInUse(contact: string, exceptId?: string) {
-    return [...profiles.values()].some((other) => other.id !== exceptId && other.contact === contact)
+    return [...profiles.values()].some((other) => other.id !== exceptId && matchesContact(other.contact, contact))
   }
 
   async function handle(route: string, request: IncomingMessage): Promise<unknown> {
@@ -137,21 +155,33 @@ export function createDemoAccounts(clock: () => number) {
     if (method === 'POST' && (route === '/session' || route === '/register')) {
       const input = await readBody(request)
       const role = input.role
-      if (role !== 'payer' && role !== 'guardian') bad('Choose a demo role.')
+      if (role !== 'payer' && role !== 'guardian' && role !== 'admin') bad('Choose a demo role.')
+      if (role === 'admin') {
+        // Admin accounts are provisioned only as samples; no self-registration.
+        if (route === '/register') bad('Admin accounts cannot self-register in the demo.')
+        if (input.sample === true) return signIn(profiles.get(sampleAdmin.id) ?? sampleAdmin)
+        const contact = demoContact(input.contact) ?? bad('Enter your demo admin email or mobile.')
+        const account = [...profiles.values()].find((entry) => entry.role === 'admin' && matchesContact(entry.contact, contact))
+        if (!account) throw new MockError(404, 'No demo admin account was found for that contact.')
+        return signIn(account)
+      }
+      // Narrowed to payer or guardian from this point.
+      const payerOrGuardian = role
       if (route === '/register') {
         const name = demoName(input.name) ?? bad('Enter a fictional full name.')
-        const contact = demoContact(input.contact) ?? bad('Use a .test email or a demo mobile starting with 00000.')
+        const contact = demoContact(input.contact) ?? bad('Enter a valid email address or 10-digit Indian mobile number.')
         if (contactInUse(contact)) throw new MockError(409, 'A demo account already uses that contact.')
-        const account = updateProfile(profile(randomUUID(), role, name, contact), input)
+        const account = updateProfile(profile(randomUUID(), payerOrGuardian, name, contact), input)
         profiles.set(account.id, account)
         return signIn(account)
       }
       if (input.sample === true) {
-        const sample = role === 'payer' ? samplePayer : sampleGuardian
+        const sample = payerOrGuardian === 'payer' ? samplePayer : sampleGuardian
         return signIn(profiles.get(sample.id) ?? sample)
       }
       const contact = demoContact(input.contact) ?? bad('Enter your demo email or mobile.')
-      const account = [...profiles.values()].find((entry) => entry.role === role && entry.contact === contact)
+      const account = [...profiles.values()].find((entry) =>
+        entry.id !== syntheticTestPayer.id && entry.role === payerOrGuardian && matchesContact(entry.contact, contact))
       if (!account) throw new MockError(404, 'No demo account was found for that role and contact.')
       return signIn(account)
     }
@@ -170,8 +200,12 @@ export function createDemoAccounts(clock: () => number) {
       profiles.set(actor.id, next)
       return next
     }
-    if (route === '/enrollment' && method === 'GET') return listEnrollments(actor)
+    if (route === '/enrollment' && method === 'GET') {
+      if (actor.role === 'admin') throw new MockError(403, 'Admin accounts cannot manage guardian enrollments.')
+      return listEnrollments(actor)
+    }
     if (route === '/enrollment' && method === 'POST' && input) {
+      if (actor.role === 'admin') throw new MockError(403, 'Admin accounts cannot manage guardian enrollments.')
       if (input.action === 'invite') {
         if (actor.role !== 'payer' || actor.sample) throw new MockError(403, 'Create your own demo payer to invite a guardian.')
         const current = latestEnrollment(actor.id)
@@ -179,9 +213,9 @@ export function createDemoAccounts(clock: () => number) {
           throw new MockError(409, 'Revoke the current invitation before sending another.')
         }
         const name = demoName(input.name) ?? bad('Enter a fictional guardian name.')
-        const contact = demoContact(input.contact) ?? bad('Enter a fictional .test email or demo mobile.')
-        const isSampleContact = [...profiles.values()].some((entry) => entry.sample && entry.contact === contact)
-        if (isSampleContact || contact === actor.contact || !relationships.includes(input.relationship as Relationship) ||
+        const contact = demoContact(input.contact) ?? bad('Enter a valid guardian email or 10-digit mobile number.')
+        const isSampleContact = [...profiles.values()].some((entry) => entry.sample && matchesContact(entry.contact, contact))
+        if (isSampleContact || matchesContact(contact, actor.contact) || !relationships.includes(input.relationship as Relationship) ||
             input.consent !== true) {
           bad('Choose a separate guardian, relationship, and sharing consent.')
         }
@@ -214,8 +248,17 @@ export function createDemoAccounts(clock: () => number) {
     throw new MockError(404, 'Demo account action unavailable.')
   }
 
+  function issueSyntheticPayerSession(actor: DemoProfile, safeLock?: boolean): DemoSession {
+    if (actor.role !== 'admin') throw new MockError(403, 'Admin authorization required.')
+    const current = profiles.get(syntheticTestPayer.id) ?? syntheticTestPayer
+    const updated = typeof safeLock === 'boolean' ? { ...current, safeLock } : current
+    profiles.set(updated.id, updated)
+    return signIn(updated)
+  }
+
   return {
-    authenticate, currentEnrollment, handle,
+    authenticate, currentEnrollment, handle, issueSyntheticPayerSession,
+    syntheticPayerId: syntheticTestPayer.id,
     isEnrolled: (id: string | undefined, payerId: string, guardianId: string | null) => {
       const invite = currentEnrollment(payerId)
       return Boolean(id && invite?.id === id && invite.guardianId === guardianId)

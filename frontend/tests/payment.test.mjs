@@ -237,7 +237,16 @@ test('the fixture rejects whitespace idempotency keys and leaves timeout decisio
 test('demo onboarding isolates roles, validates fictional details and expires sessions', async (t) => {
   const { account, call, advance } = await fixture(t)
   const payer = { role: 'payer', name: 'New Demo', contact: 'new@fixture.test', category: 'enterprise', language: 'kn' }
-  assert.equal((await account('/register', { ...payer, contact: 'new@gmail.com' })).code, 422)
+  assert.equal((await account('/register', { ...payer, contact: 'not-an-email' })).code, 422)
+  assert.equal((await account('/register', { ...payer, contact: '12345' })).code, 422)
+  assert.equal((await account('/register', { ...payer, contact: '+1234567890' })).code, 422)
+  const gmailPayer = await account('/register', { ...payer, name: 'Gmail User', contact: 'new@gmail.com' })
+  assert.equal(gmailPayer.code, 200)
+  assert.equal((await account('/session', { role: 'payer', contact: 'new@gmail.com' })).code, 200)
+  const mobilePayer = await account('/register', { ...payer, name: 'Mobile User', contact: '9876543210' })
+  assert.equal(mobilePayer.code, 200)
+  assert.equal((await account('/session', { role: 'payer', contact: '+919876543210' })).code, 200)
+  assert.equal((await account('/register', { ...payer, name: 'Duplicate User', contact: '+919876543210' })).code, 409)
   assert.equal((await account('/register', { ...payer, role: 'admin' })).code, 422)
   const registered = await account('/register', payer)
   assert.equal(registered.code, 200)
@@ -325,4 +334,188 @@ test('demo enrollment and registration decode Unicode names split across chunks'
   })
   assert.equal(result.code, 200)
   assert.equal(result.body.profile.name, name)
+})
+
+test('realistic authentication and onboarding: standard emails, Indian mobiles, and role isolation', async (t) => {
+  const { account } = await fixture(t)
+
+  // 1. Valid standard email domains (Gmail, Outlook, Yahoo)
+  const gmailReg = await account('/register', {
+    role: 'payer', name: 'Asha Verma', contact: 'asha.verma@gmail.com', category: 'personal', language: 'en',
+  })
+  assert.equal(gmailReg.code, 200)
+  assert.equal(gmailReg.body.profile.contact, 'asha.verma@gmail.com')
+
+  const outlookReg = await account('/register', {
+    role: 'payer', name: 'Rohan Mehta', contact: 'rohan.m@outlook.com', category: 'professional', language: 'kn',
+  })
+  assert.equal(outlookReg.code, 200)
+
+  const yahooReg = await account('/register', {
+    role: 'guardian', name: 'Kavita Rao', contact: 'kavita_rao@yahoo.com', language: 'te',
+  })
+  assert.equal(yahooReg.code, 200)
+
+  // 2. Valid Indian mobile numbers and cross-prefix login (+91 vs 10-digit)
+  const mobileReg = await account('/register', {
+    role: 'payer', name: 'Vikram Singh', contact: '9876543210', category: 'small_business', language: 'hi',
+  })
+  assert.equal(mobileReg.code, 200)
+  assert.equal(mobileReg.body.profile.contact, '9876543210')
+
+  // Sign in with +91 prefix for the 10-digit registered number
+  const prefixLogin = await account('/session', { role: 'payer', contact: '+919876543210' })
+  assert.equal(prefixLogin.code, 200)
+  assert.equal(prefixLogin.body.profile.name, 'Vikram Singh')
+
+  // Register with +91 prefix and sign in with bare 10-digit
+  const plus91Reg = await account('/register', {
+    role: 'guardian', name: 'Sunil Kumar', contact: '+919123456789', language: 'en',
+  })
+  assert.equal(plus91Reg.code, 200)
+  const bareLogin = await account('/session', { role: 'guardian', contact: '9123456789' })
+  assert.equal(bareLogin.code, 200)
+  assert.equal(bareLogin.body.profile.name, 'Sunil Kumar')
+
+  // 3. Duplicate contact detection across formats (409 Conflict)
+  assert.equal((await account('/register', {
+    role: 'payer', name: 'Imposter Vikram', contact: '+919876543210',
+  })).code, 409)
+
+  assert.equal((await account('/register', {
+    role: 'guardian', name: 'Duplicate Asha', contact: 'asha.verma@gmail.com',
+  })).code, 409)
+
+  // 4. Input validation (422 Unprocessable)
+  const invalidContacts = [
+    'plainaddress',
+    'missingatsign.com',
+    '@nodomain.com',
+    'username@.com',
+    '12345',              // Too short
+    '+1234567890123',     // Non-Indian country code
+    '5876543210',         // Invalid Indian mobile start digit (must be 6-9)
+    '987654321',          // 9 digits (too short)
+    '98765432100',        // 11 digits (too long)
+  ]
+  for (const badContact of invalidContacts) {
+    const res = await account('/register', { role: 'payer', name: 'Test User', contact: badContact })
+    assert.equal(res.code, 422, `Expected 422 for contact: ${badContact}`)
+  }
+
+  // 5. Role isolation: Payer cannot login as Guardian, Guardian cannot login as Payer
+  assert.equal((await account('/session', { role: 'guardian', contact: 'asha.verma@gmail.com' })).code, 404)
+  assert.equal((await account('/session', { role: 'payer', contact: 'kavita_rao@yahoo.com' })).code, 404)
+
+  // 6. Realistic Guardian Invitation and Acceptance Flow
+  const payerToken = gmailReg.body.token
+  const guardianContact = 'guardian.safety@gmail.com'
+
+  // Payer invites realistic guardian
+  const inviteRes = await account('/enrollment', {
+    action: 'invite', name: 'Safety Guardian', contact: guardianContact, relationship: 'Family', consent: true,
+  }, payerToken)
+  assert.equal(inviteRes.code, 200)
+  assert.equal(inviteRes.body[0].status, 'Pending')
+  const inviteId = inviteRes.body[0].id
+
+  // Guardian registers and accepts
+  const guardianSession = (await account('/register', {
+    role: 'guardian', name: 'Safety Guardian', contact: guardianContact,
+  })).body
+  const pendingForGuardian = await account('/enrollment', undefined, guardianSession.token)
+  assert.equal(pendingForGuardian.code, 200)
+  assert.equal(pendingForGuardian.body.length, 1)
+  assert.equal(pendingForGuardian.body[0].id, inviteId)
+
+  // Accept with explicit consent
+  const acceptRes = await account('/enrollment', {
+    action: 'accept', id: inviteId, consent: true,
+  }, guardianSession.token)
+  assert.equal(acceptRes.code, 200)
+  assert.equal(acceptRes.body[0].status, 'Accepted')
+
+  // Payer checks status
+  const payerCheck = await account('/enrollment', undefined, payerToken)
+  assert.equal(payerCheck.body[0].status, 'Accepted')
+
+  // Payer revokes
+  const revokeRes = await account('/enrollment', { action: 'revoke', id: inviteId }, payerToken)
+  assert.equal(revokeRes.code, 200)
+  assert.equal(revokeRes.body[0].status, 'Revoked')
+})
+
+test('admin login, role isolation, synthetic payer context and hash-chained audit verification', async (t) => {
+  const { account, call, create } = await fixture(t)
+
+  // 1. Public admin self-registration is blocked; unprovisioned admin login returns 404
+  assert.equal((await account('/register', { role: 'admin', name: 'Fake Admin', contact: 'fake@admin.test' })).code, 422)
+  assert.equal((await account('/session', { role: 'admin', contact: 'unknown@admin.test' })).code, 404)
+
+  // 2. Provisioned demo admin login succeeds
+  const adminLogin = await account('/session', { role: 'admin', contact: 'admin@pauseguard.test' })
+  assert.equal(adminLogin.code, 200)
+  assert.equal(adminLogin.body.profile.role, 'admin')
+  const adminToken = adminLogin.body.token
+
+  const sampleAdmin = await account('/session', { role: 'admin', sample: true })
+  assert.equal(sampleAdmin.code, 200)
+  assert.equal(sampleAdmin.body.profile.id, 'demo-admin')
+
+  // 3. Normal payer and guardian cannot access admin endpoints
+  const realPayerToken = (await account('/session', { role: 'payer', sample: true })).body.token
+  const realGuardianToken = (await account('/session', { role: 'guardian', sample: true })).body.token
+  assert.equal((await account('/admin/test-payer', {}, realPayerToken)).code, 403)
+  assert.equal((await account('/admin/test-payer', {}, realGuardianToken)).code, 403)
+  assert.equal((await account('/admin/audit', undefined, realPayerToken)).code, 403)
+  assert.equal((await call('/audit/verify', demoTokens.payer)).code, 403)
+  assert.equal((await call('/audit/verify', demoTokens.guardian)).code, 403)
+
+  // 4. Admin cannot call payer endpoints directly or access another payer's payment
+  const realPayerPayment = await create(routine)
+  assert.equal((await call('/payments', adminToken, routine)).code, 403)
+  assert.equal((await call(`/payments/${realPayerPayment.id}`, adminToken)).code, 404)
+  assert.equal((await account('/enrollment', undefined, adminToken)).code, 403)
+
+  // 5. Admin obtains an explicitly authorized synthetic payer context & runs test payments
+  const synthRes = await account('/admin/test-payer', { safeLock: false }, adminToken)
+  assert.equal(synthRes.code, 200)
+  assert.equal(synthRes.body.profile.id, 'admin-synthetic-payer')
+  assert.equal(synthRes.body.profile.role, 'payer')
+  const synthToken = synthRes.body.token
+
+  // Coerced KYC without guardian goes to AWAITING_FALLBACK_REVIEW (never bypasses)
+  const fallbackTest = await call('/payments', synthToken, { ...coerced, idempotency_key: 'admin-coerced-1' })
+  assert.equal(fallbackTest.code, 200)
+  assert.equal(fallbackTest.body.status, 'AWAITING_FALLBACK_REVIEW')
+  assert.equal(fallbackTest.body.tier, 3)
+
+  // Routine test reaches READY_TO_EXECUTE and executes only after separate confirmation
+  const routineTest = await call('/payments', synthToken, { ...routine, idempotency_key: 'admin-routine-1' })
+  assert.equal(routineTest.code, 200)
+  assert.equal(routineTest.body.status, 'READY_TO_EXECUTE')
+  const confirmed = await call(`/payments/${routineTest.body.id}/confirm`, synthToken, { idempotency_key: 'admin-confirm-1' })
+  assert.equal(confirmed.code, 200)
+  assert.equal(confirmed.body.status, 'EXECUTED')
+
+  // Safe-Lock toggle on synthetic payer blocks subsequent tests
+  const lockedCtx = await account('/admin/test-payer', { safeLock: true }, adminToken)
+  assert.equal(lockedCtx.code, 200)
+  assert.equal(lockedCtx.body.profile.safeLock, true)
+  const blockedBySafeLock = await call('/payments', lockedCtx.body.token, { ...routine, idempotency_key: 'admin-safelock-1' })
+  assert.equal(blockedBySafeLock.code, 200)
+  assert.equal(blockedBySafeLock.body.status, 'REJECTED')
+
+  // 6. Admin audit is isolated to synthetic payer only & hash chain verifies
+  const auditRes = await account('/admin/audit', undefined, adminToken)
+  assert.equal(auditRes.code, 200)
+  const auditPaymentIds = auditRes.body.payments.map((p) => p.id)
+  assert.ok(auditPaymentIds.includes(routineTest.body.id))
+  assert.ok(!auditPaymentIds.includes(realPayerPayment.id))
+  assert.ok(auditRes.body.events.length >= 4)
+
+  const verifyRes = await call('/audit/verify', adminToken)
+  assert.equal(verifyRes.code, 200)
+  assert.equal(verifyRes.body.valid, true)
+  assert.ok(verifyRes.body.total_events >= 4)
 })
