@@ -26,6 +26,13 @@ SYNTHETIC_ANALYST_ID = UUID("00000000-0000-0000-0000-000000000003")
 SYNTHETIC_ADMIN_ID = UUID("00000000-0000-0000-0000-000000000004")
 SYNTHETIC_OTHER_PAYER_ID = UUID("00000000-0000-0000-0000-000000000005")
 
+# Canonical synthetic demo tokens for local/test authorization
+SYNTHETIC_PAYER_TOKEN = "demo-token-payer"
+SYNTHETIC_GUARDIAN_TOKEN = "demo-token-guardian"
+SYNTHETIC_ANALYST_TOKEN = "demo-token-analyst"
+SYNTHETIC_ADMIN_TOKEN = "demo-token-admin"
+SYNTHETIC_OTHER_PAYER_TOKEN = "demo-token-other-payer"
+
 # Canonical synthetic actor contexts with immutable role grants
 SYNTHETIC_PAYER = TrustedActorContext(
     user_id=SYNTHETIC_PAYER_ID,

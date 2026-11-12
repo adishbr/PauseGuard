@@ -292,6 +292,15 @@ class GuardianService:
             guarded_payers=[],
         )
 
+    def count_active_guardianships(self, guardian_id: UUID) -> int:
+        """Count active payer guardianships for a given guardian."""
+        with self._lock:
+            return sum(
+                1 for r in self._enrollments.values()
+                if (r.guardian_id == guardian_id or str(r.guardian_id) == str(guardian_id)) and r.status == "active"
+            )
+
+
 
 _default_guardian_service: Optional[GuardianService] = None
 
