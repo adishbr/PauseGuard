@@ -8,14 +8,20 @@ from app.config import ConfigurationError, Settings, load_settings
 
 
 def test_defaults_and_injected_environment():
-    assert load_settings({}) == Settings(environment="local", mode="mock")
+    assert load_settings({}) == Settings(environment="local", mode="mock", allow_demo_auth=False)
     assert load_settings({"PAUSEGUARD_ENVIRONMENT": "test"}).environment == "test"
+    assert load_settings({}).allow_demo_auth is False
 
 
 def test_only_allowlisted_environment_keys_are_read():
     class AllowlistedEnvironment(Mapping):
         def __getitem__(self, key):
-            assert key in {"PAUSEGUARD_ENVIRONMENT", "PAUSEGUARD_MODE"}
+            assert key in {
+                "PAUSEGUARD_ENVIRONMENT",
+                "PAUSEGUARD_MODE",
+                "PAUSEGUARD_ALLOW_DEMO_AUTH",
+                "PAUSEGUARD_ENABLE_DEMO_AUTH",
+            }
             raise KeyError(key)
 
         def __iter__(self):
@@ -25,6 +31,23 @@ def test_only_allowlisted_environment_keys_are_read():
             pytest.fail("The environment must not be enumerated.")
 
     assert load_settings(AllowlistedEnvironment()) == Settings()
+
+
+def test_demo_auth_opt_in_from_environment():
+    assert load_settings({"PAUSEGUARD_ALLOW_DEMO_AUTH": "true"}).allow_demo_auth is True
+    assert load_settings({"PAUSEGUARD_ENABLE_DEMO_AUTH": "1"}).allow_demo_auth is True
+    assert load_settings({"PAUSEGUARD_ALLOW_DEMO_AUTH": "false"}).allow_demo_auth is False
+    assert load_settings({"PAUSEGUARD_ALLOW_DEMO_AUTH": "0"}).allow_demo_auth is False
+
+
+def test_settings_demo_auth_aliases_and_properties():
+    s1 = Settings(allow_demo_auth=True)
+    assert s1.allow_demo_auth is True
+    assert s1.enable_demo_auth is True
+
+    s2 = Settings(enable_demo_auth=True)
+    assert s2.allow_demo_auth is True
+    assert s2.enable_demo_auth is True
 
 
 def test_process_environment_is_validated(monkeypatch):

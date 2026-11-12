@@ -11,7 +11,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
-from app.models.user import UserRole
+from app.models.roles import UserRole
 
 
 class PaymentStatus(StrEnum):

@@ -58,7 +58,7 @@ try:
     assert not Base.metadata.tables
     from app.models.metadata import metadata
     assert set(metadata.tables) == {'users', 'role_bindings', 'accounts', 'safe_lock_states'}
-    assert set(app.openapi()['paths']) == {'/api/v2/health'}
+    assert set(app.openapi()['paths']) == {'/api/v2/health', '/api/v2/profile'}
     print('guarded cold import passed')
 finally:
     cleanup()

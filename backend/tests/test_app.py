@@ -38,9 +38,13 @@ def test_applications_do_not_share_dependency_overrides(create_app):
     assert not second.dependency_overrides
 
 
-def test_only_health_is_exposed_as_a_domain_route(application):
-    assert set(application.openapi()["paths"]) == {"/api/v2/health"}
+def test_only_canonical_v2_foundation_routes_are_exposed(application):
+    assert set(application.openapi()["paths"]) == {"/api/v2/health", "/api/v2/profile"}
     assert application.debug is False
+
+
+# Alias for backward compatibility with existing test runners
+test_only_health_is_exposed_as_a_domain_route = test_only_canonical_v2_foundation_routes_are_exposed
 
 
 def test_factory_rejects_invalid_environment(monkeypatch, create_app):
