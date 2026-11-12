@@ -8,21 +8,24 @@ Endpoints:
 - POST /guardian/calls/provider-callback: Webhook callback for telephony events.
 """
 
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
+from app.api.payments import get_payment_engine
 from app.auth.dependencies import get_current_actor
 from app.auth.schemas import (
     CallCallbackRequest,
     CallCallbackResponse,
     CallStatusResponse,
+    GuardianDashboardResponse,
     GuardianEnrollRequest,
     GuardianEnrollResponse,
     GuardianRevokeResponse,
     GuardianStatusResponse,
 )
 from app.config import load_settings
+from app.models.roles import UserRole
 from app.services.guardian_service import get_guardian_service
 from app.services.payment_guards import TrustedActorContext
 from app.services.telephony_service import get_telephony_service
@@ -52,6 +55,29 @@ def get_guardian_status(
     """Retrieve guardian enrollment status for the authenticated actor."""
     service = get_guardian_service()
     return service.get_status(actor)
+
+
+@router.get("/dashboard", response_model=GuardianDashboardResponse)
+def get_guardian_dashboard(
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> GuardianDashboardResponse:
+    """Retrieve dashboard summary for an enrolled guardian."""
+    if UserRole.GUARDIAN not in actor.roles and UserRole.ADMIN not in actor.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Only authenticated guardians can access the guardian dashboard",
+        )
+    service = get_guardian_service()
+    active_count = service.count_active_guardianships(actor.user_id)
+    pending_reviews = engine.get_guardian_pending_reviews(actor.user_id)
+    return GuardianDashboardResponse(
+        guardian_id=actor.user_id,
+        active_guardianships_count=active_count,
+        pending_reviews_count=len(pending_reviews),
+        pending_reviews=pending_reviews,
+    )
+
 
 
 @router.post("/revoke", response_model=GuardianRevokeResponse)

@@ -106,7 +106,7 @@ class PaymentService:
     """Thread-safe in-memory repository and state transition orchestrator for V2 payments."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._payments: Dict[str, PaymentRecord] = {}
         self._idempotency_index: Dict[tuple[UUID, str], str] = {}
         self._safe_lock_states: Dict[UUID, bool] = {
@@ -622,6 +622,181 @@ class PaymentService:
                 acknowledged_at=now_str,
                 can_execute_payment=False,
             )
+
+    def _build_redacted_view(self, record: PaymentRecord) -> RedactedPaymentView:
+        alert_info = _build_alert(case_id=record.id)
+        return RedactedPaymentView(
+            id=record.id,
+            status=record.status.value,
+            tier=record.tier,
+            guardian_deadline=record.guardian_deadline.isoformat() if record.guardian_deadline else None,
+            message=alert_info["message"],
+        )
+
+    def list_payments(
+        self,
+        actor: TrustedActorContext,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[Union[FullPaymentView, RedactedPaymentView]]:
+        """List payments accessible to the actor with strict role-based privacy redaction."""
+        limit = min(max(1, limit), 100)
+        offset = max(0, offset)
+
+        with self._lock:
+            if UserRole.PAYER in actor.roles:
+                records = [r for r in self._payments.values() if r.payer_id == actor.user_id]
+                records.sort(key=lambda r: r.created_at, reverse=True)
+                page = records[offset : offset + limit]
+                return [
+                    FullPaymentView(
+                        id=r.id,
+                        status=r.status.value,
+                        tier=r.tier,
+                        amount_paise=r.amount_paise,
+                        beneficiary_id=r.beneficiary_id,
+                        purpose=r.purpose,
+                        guardian_deadline=r.guardian_deadline.isoformat() if r.guardian_deadline else None,
+                        assigned_guardian_id=str(r.assigned_guardian_id) if r.assigned_guardian_id else None,
+                        version=r.version,
+                    )
+                    for r in page
+                ]
+
+            if UserRole.GUARDIAN in actor.roles:
+                records = [r for r in self._payments.values() if r.assigned_guardian_id == actor.user_id]
+                records.sort(key=lambda r: r.created_at, reverse=True)
+                page = records[offset : offset + limit]
+                return [self._build_redacted_view(r) for r in page]
+
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Caller does not have payment history access permissions",
+            )
+
+    def get_account_balance_info(self, user_id: UUID) -> tuple[int, int]:
+        """Retrieve balance in paise and number of ledger entries for a user."""
+        with self._lock:
+            if user_id not in self._accounts:
+                self._accounts[user_id] = DEFAULT_MOCK_BALANCE_PAISE
+            balance = self._accounts[user_id]
+            ledger_count = len([e for e in self._ledger_entries if e["account_id"] == str(user_id)])
+            return balance, ledger_count
+
+    def get_payment_events(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> list[dict]:
+        """Retrieve audit/lifecycle events for a payment."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+
+        view_level = authorize_payment_view_level(
+            actor,
+            payer_id=record.payer_id,
+            assigned_guardian_id=record.assigned_guardian_id,
+        )
+
+        with self._lock:
+            events = [
+                {
+                    "event_type": "PAYMENT_CREATED",
+                    "payment_id": record.id,
+                    "status": record.status.value,
+                    "timestamp": record.created_at,
+                }
+            ]
+            if record.decision_recorded_at:
+                events.append({
+                    "event_type": "GUARDIAN_DECISION",
+                    "payment_id": record.id,
+                    "status": record.status.value,
+                    "timestamp": record.decision_recorded_at,
+                })
+            if record.fallback_activated_at:
+                events.append({
+                    "event_type": "FALLBACK_ACTIVATED",
+                    "payment_id": record.id,
+                    "status": record.status.value,
+                    "timestamp": record.fallback_activated_at,
+                })
+            if record.confirmed_at:
+                events.append({
+                    "event_type": "PAYMENT_CONFIRMED",
+                    "payment_id": record.id,
+                    "status": record.status.value,
+                    "timestamp": record.confirmed_at,
+                })
+
+            if view_level == "redacted":
+                for ev in events:
+                    ev.pop("amount_paise", None)
+                    ev.pop("purpose", None)
+            return events
+
+    def get_guardian_pending_reviews(
+        self,
+        guardian_id: UUID,
+    ) -> list[RedactedPaymentView]:
+        """Retrieve active pending reviews assigned to a guardian."""
+        with self._lock:
+            pending: list[RedactedPaymentView] = []
+            for record in self._payments.values():
+                if (
+                    record.assigned_guardian_id == guardian_id
+                    and record.status == PaymentStatus.AWAITING_GUARDIAN
+                ):
+                    pending.append(self._build_redacted_view(record))
+            return pending
+
+    def toggle_safe_lock(
+        self,
+        payer_id: UUID,
+        is_locked: bool,
+    ) -> tuple[bool, int, str]:
+        """Toggle Safe-Lock state for a payer."""
+        with self._lock:
+            self._safe_lock_states[payer_id] = is_locked
+            now_str = datetime.now(timezone.utc).isoformat()
+            return is_locked, 1, now_str
+
+    def get_safe_lock_status(
+        self,
+        payer_id: UUID,
+    ) -> tuple[bool, int, Optional[str]]:
+        """Retrieve Safe-Lock status for a payer."""
+        with self._lock:
+            locked = self._safe_lock_states.get(payer_id)
+            if locked is None:
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail="Authoritative Safe-Lock state is unavailable for payer (fail-closed)",
+                )
+            return locked, 1, datetime.now(timezone.utc).isoformat()
+
+    def verify_audit_chain(self) -> tuple[bool, int, str]:
+        """Verify mock audit hash chain."""
+        with self._lock:
+            if not hasattr(self, "_audit_chain") or not self._audit_chain.records:
+                from safety.audit.audit_chain import AuditChain
+                self._audit_chain = AuditChain()
+                self._audit_chain.append("SYSTEM_START", {"status": "initialized"})
+            valid = self._audit_chain.verify()
+            return valid, len(self._audit_chain.records), self._audit_chain.records[-1].record_hash
+
+    def get_audit_chain(self):
+        """Retrieve mock audit chain for anchoring."""
+        with self._lock:
+            if not hasattr(self, "_audit_chain") or not self._audit_chain.records:
+                from safety.audit.audit_chain import AuditChain
+                self._audit_chain = AuditChain()
+                self._audit_chain.append("SYSTEM_START", {"status": "initialized"})
+            return self._audit_chain
+
+
 
 
 _default_payment_service: Optional[PaymentService] = None

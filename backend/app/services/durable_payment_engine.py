@@ -761,3 +761,181 @@ class DurablePaymentEngine:
             version=payment.version,
         )
 
+    def _build_redacted_view(self, payment: Payment) -> RedactedPaymentView:
+        return RedactedPaymentView(
+            id=payment.id,
+            status=payment.status,
+            tier=payment.tier,
+            guardian_deadline=payment.guardian_deadline.isoformat() if payment.guardian_deadline else None,
+            message="PauseGuard security review required: Please review this transaction.",
+        )
+
+    def list_payments(
+        self,
+        actor: TrustedActorContext,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[Union[FullPaymentView, RedactedPaymentView]]:
+        """List payments accessible to the actor with strict role-based privacy redaction."""
+        limit = min(max(1, limit), 100)
+        offset = max(0, offset)
+
+        if UserRole.PAYER in actor.roles:
+            payments = (
+                self.session.query(Payment)
+                .filter(Payment.payer_id == actor.user_id)
+                .order_by(Payment.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            return [self._build_full_view(p) for p in payments]
+
+        if UserRole.GUARDIAN in actor.roles:
+            payments = (
+                self.session.query(Payment)
+                .filter(Payment.assigned_guardian_id == actor.user_id)
+                .order_by(Payment.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            return [self._build_redacted_view(p) for p in payments]
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Caller does not have payment history access permissions",
+        )
+
+    def get_account_balance_info(self, user_id: UUID) -> tuple[int, int]:
+        """Return (balance_paise, ledger_entries_count) for the specified account owner."""
+        account = self.session.query(MockAccount).filter(MockAccount.owner_id == user_id).one_or_none()
+        if not account:
+            return 0, 0
+        entries_count = self.session.query(LedgerEntry).filter(LedgerEntry.account_id == account.id).count()
+        return account.balance_paise, entries_count
+
+    def get_payment_events(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> list[dict]:
+        """Return ordered audit events for a payment with role-based redaction."""
+        payment = self.session.query(Payment).filter(Payment.id == payment_id).one_or_none()
+        if not payment:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+
+        level = authorize_payment_view_level(
+            actor=actor,
+            payer_id=payment.payer_id,
+            assigned_guardian_id=payment.assigned_guardian_id,
+        )
+
+        events = (
+            self.session.query(AuditEvent)
+            .filter(AuditEvent.payment_id == payment_id)
+            .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+            .all()
+        )
+
+        if level.upper() == "FULL":
+            return [
+                {
+                    "id": str(e.id),
+                    "event_type": e.event_type,
+                    "payment_id": e.payment_id,
+                    "actor_id": str(e.actor_id),
+                    "actor_role": e.actor_role,
+                    "prev_hash": e.prev_hash,
+                    "event_hash": e.event_hash,
+                    "payload": e.payload_json,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in events
+            ]
+        else:
+            return [
+                {
+                    "event_type": e.event_type,
+                    "payment_id": e.payment_id,
+                    "status": payment.status,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                    "redacted": True,
+                }
+                for e in events
+            ]
+
+    def get_guardian_pending_reviews(self, guardian_id: UUID) -> list[RedactedPaymentView]:
+        """Return all active payments awaiting review assigned to this guardian."""
+        now = datetime.now(timezone.utc)
+        payments = (
+            self.session.query(Payment)
+            .filter(
+                Payment.assigned_guardian_id == guardian_id,
+                Payment.status == PaymentStatus.AWAITING_GUARDIAN.value,
+            )
+            .order_by(Payment.created_at.desc())
+            .all()
+        )
+        # Filter for non-expired deadlines
+        valid_payments = [
+            p for p in payments
+            if p.guardian_deadline is None or (
+                p.guardian_deadline.replace(tzinfo=timezone.utc)
+                if p.guardian_deadline.tzinfo is None
+                else p.guardian_deadline
+            ) > now
+        ]
+        return [self._build_redacted_view(p) for p in valid_payments]
+
+    def toggle_safe_lock(self, payer_id: UUID, is_locked: bool) -> tuple[bool, int, str]:
+        """Atomically toggle Safe-Lock state for a payer."""
+        safe_lock = self.session.scalars(safe_lock_for_payer_for_update(payer_id)).one_or_none()
+        now = datetime.now(timezone.utc)
+        if safe_lock is None:
+            safe_lock = SafeLockState(
+                payer_id=payer_id,
+                is_locked=is_locked,
+                version=1,
+            )
+            self.session.add(safe_lock)
+        else:
+            safe_lock.is_locked = is_locked
+            safe_lock.version += 1
+        self.session.flush()
+        updated_at = safe_lock.updated_at.isoformat() if safe_lock.updated_at else now.isoformat()
+        return safe_lock.is_locked, safe_lock.version, updated_at
+
+    def get_safe_lock_status(self, payer_id: UUID) -> tuple[bool, int, Optional[str]]:
+        """Return current Safe-Lock state for a payer."""
+        safe_lock = self.session.query(SafeLockState).filter(SafeLockState.payer_id == payer_id).one_or_none()
+        if safe_lock is None:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="Authoritative Safe-Lock state is unavailable for payer (fail-closed)",
+            )
+        updated_at = safe_lock.updated_at.isoformat() if safe_lock.updated_at else None
+        return safe_lock.is_locked, safe_lock.version, updated_at
+
+    def verify_audit_chain(self) -> tuple[bool, int, str]:
+        """Verify the integrity of the database audit hash chain."""
+        events = self.session.query(AuditEvent).order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc()).all()
+        if not events:
+            return True, 0, GENESIS_HASH
+        prev_hash = GENESIS_HASH
+        for event in events:
+            if event.prev_hash != prev_hash:
+                return False, len(events), event.prev_hash
+            expected_hash = _compute_hash(
+                prev_hash,
+                event.event_type,
+                event.payment_id,
+                event.actor_id,
+                event.payload_json,
+            )
+            if event.event_hash != expected_hash:
+                return False, len(events), event.event_hash
+            prev_hash = event.event_hash
+        return True, len(events), events[-1].event_hash
+
+
