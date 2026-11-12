@@ -9,6 +9,14 @@ or authorize or execute payments.
 from dataclasses import dataclass
 
 
+# Only methods explicitly approved by the backend security design
+# may be accepted. This label represents trusted backend evidence,
+# not a verification service implemented by this module.
+ALLOWED_VERIFICATION_METHODS = frozenset({
+    "trusted_backend_verification",
+})
+
+
 @dataclass(frozen=True)
 class GuardianVerificationResult:
     verified: bool
@@ -23,21 +31,14 @@ def evaluate_guardian_identity(
     identity_verified: bool,
     verification_method: str,
 ) -> GuardianVerificationResult:
-    """Evaluate backend-supplied guardian identity evidence.
-
-    Only an explicit successful identity verification with a matching
-    guardian ID and an accepted verification method passes.
-
-    Phone-call connection and DTMF input are never sufficient evidence.
-    """
+    """Evaluate backend-supplied guardian identity evidence."""
 
     if (
         not isinstance(expected_guardian_id, str)
         or not expected_guardian_id.strip()
     ):
         return GuardianVerificationResult(
-            False,
-            "invalid_expected_guardian_id",
+            False, "invalid_expected_guardian_id"
         )
 
     if (
@@ -45,46 +46,39 @@ def evaluate_guardian_identity(
         or not verified_guardian_id.strip()
     ):
         return GuardianVerificationResult(
-            False,
-            "missing_verified_guardian_id",
+            False, "missing_verified_guardian_id"
         )
 
     if not isinstance(identity_verified, bool):
         return GuardianVerificationResult(
-            False,
-            "invalid_verification_status",
+            False, "invalid_verification_status"
         )
 
     if identity_verified is not True:
         return GuardianVerificationResult(
-            False,
-            "identity_not_verified",
+            False, "identity_not_verified"
         )
 
     if not isinstance(verification_method, str):
         return GuardianVerificationResult(
-            False,
-            "invalid_verification_method",
+            False, "invalid_verification_method"
         )
 
     method = verification_method.strip().lower()
 
-    if method in {"call_connected", "dtmf", "dtmf_only"}:
-        return GuardianVerificationResult(
-            False,
-            "insufficient_verification_method",
-        )
-
     if not method:
         return GuardianVerificationResult(
-            False,
-            "missing_verification_method",
+            False, "missing_verification_method"
+        )
+
+    if method not in ALLOWED_VERIFICATION_METHODS:
+        return GuardianVerificationResult(
+            False, "unapproved_verification_method"
         )
 
     if verified_guardian_id != expected_guardian_id:
         return GuardianVerificationResult(
-            False,
-            "guardian_id_mismatch",
+            False, "guardian_id_mismatch"
         )
 
     return GuardianVerificationResult(

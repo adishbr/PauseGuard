@@ -53,7 +53,7 @@ class TestGuardianIdentityPolicy(unittest.TestCase):
         self.assertFalse(result.verified)
         self.assertEqual(
             result.reason,
-            "insufficient_verification_method",
+            "unapproved_verification_method",
         )
 
     def test_dtmf_alone_is_rejected(self):
@@ -69,7 +69,7 @@ class TestGuardianIdentityPolicy(unittest.TestCase):
                 self.assertFalse(result.verified)
                 self.assertEqual(
                     result.reason,
-                    "insufficient_verification_method",
+                    "unapproved_verification_method",
                 )
 
     def test_missing_guardian_id_is_rejected(self):
@@ -186,6 +186,66 @@ class TestGuardianIdentityPolicy(unittest.TestCase):
 
         with self.assertRaises(AttributeError):
             result.verified = False
+
+    # Phase 7: Additional security tests
+
+    def test_unknown_verification_method_is_rejected(self):
+        result = evaluate_guardian_identity(
+            "GUARDIAN-001",
+            "GUARDIAN-001",
+            True,
+            "email_claim",
+        )
+
+        self.assertFalse(result.verified)
+        self.assertEqual(
+            result.reason,
+            "unapproved_verification_method",
+        )
+
+    def test_arbitrary_non_empty_methods_are_rejected(self):
+        for method in (
+            "sms",
+            "email",
+            "biometric",
+            "admin_override",
+        ):
+            with self.subTest(method=method):
+                result = evaluate_guardian_identity(
+                    "GUARDIAN-001",
+                    "GUARDIAN-001",
+                    True,
+                    method,
+                )
+
+                self.assertFalse(result.verified)
+                self.assertFalse(result.can_authorize_payment)
+                self.assertFalse(result.can_execute_payment)
+
+    def test_approved_method_is_case_insensitive(self):
+        result = evaluate_guardian_identity(
+            "GUARDIAN-001",
+            "GUARDIAN-001",
+            True,
+            "TRUSTED_BACKEND_VERIFICATION",
+        )
+
+        self.assertTrue(result.verified)
+        self.assertEqual(result.reason, "identity_verified")
+
+    def test_unapproved_method_with_matching_id_is_rejected(self):
+        result = evaluate_guardian_identity(
+            "GUARDIAN-001",
+            "GUARDIAN-001",
+            True,
+            "unknown_method",
+        )
+
+        self.assertFalse(result.verified)
+        self.assertEqual(
+            result.reason,
+            "unapproved_verification_method",
+        )
 
 
 if __name__ == "__main__":
