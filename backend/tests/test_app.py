@@ -48,8 +48,10 @@ CANONICAL_V2_ROUTES = {
     "/api/v2/guardian/calls/provider-callback",
     "/api/v2/payments",
     "/api/v2/payments/{payment_id}",
+    "/api/v2/payments/{payment_id}/warning/acknowledge",
     "/api/v2/payments/{payment_id}/guardian/decision",
     "/api/v2/payments/{payment_id}/fallback/activate",
+    "/api/v2/payments/{payment_id}/cancel",
     "/api/v2/payments/{payment_id}/confirm",
 }
 

@@ -151,6 +151,17 @@ class PaymentFallbackResponse(BaseModel):
     can_authorize_payment: bool = Field(False, description="Invariant: fallback transition cannot authorize payment")
 
 
+class PaymentWarningAckResponse(BaseModel):
+    """Response confirming payer acknowledgment of a risk or threshold warning."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    payment_id: str
+    status: str = Field("READY_TO_EXECUTE")
+    acknowledged_at: str
+    can_execute_payment: bool = Field(False, description="Invariant: warning acknowledgment does not execute payment")
+
+
 class PaymentConfirmRequest(BaseModel):
     """Final confirmation request submitted by the owning payer."""
 

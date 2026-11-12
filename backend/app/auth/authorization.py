@@ -73,6 +73,12 @@ def verify_guardian_to_payer_relationship(
     if authoritative_guardian is None:
         raise GuardianAssignmentError("Forbidden: Payer has no enrolled guardian on record")
 
+    from app.services.guardian_service import get_guardian_service
+    if not get_guardian_service().is_guardian_verified(authoritative_guardian):
+        raise GuardianAssignmentError(
+            "Forbidden: Assigned guardian lacks authoritative server-verified identity"
+        )
+
     if assigned_guardian_id is not None:
         if not isinstance(assigned_guardian_id, UUID):
             raise AuthorizationError("Invalid assigned_guardian_id format")
