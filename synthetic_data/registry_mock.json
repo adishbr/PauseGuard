@@ -1,0 +1,42 @@
+{
+  "registry_version": "2.0.0-mock",
+  "is_synthetic": true,
+  "declaration": "Fictional synthetic mock registry for PauseGuard Policy Lab evaluation only. Does not represent real-world bank, police, or cybercrime records.",
+  "flagged_beneficiaries": {
+    "ben_synth_mule_ring_01": {
+      "risk_category": "confirmed_mule",
+      "flagged_date": "2026-10-15",
+      "reporting_source": "mock_cybercrime_portal",
+      "confidence": "high",
+      "is_synthetic": true
+    },
+    "ben_synth_mule_ring_02": {
+      "risk_category": "confirmed_mule",
+      "flagged_date": "2026-10-20",
+      "reporting_source": "mock_bank_consortium",
+      "confidence": "high",
+      "is_synthetic": true
+    },
+    "ben_synth_impersonation_hub_03": {
+      "risk_category": "police_impersonation",
+      "flagged_date": "2026-11-01",
+      "reporting_source": "mock_cybercrime_portal",
+      "confidence": "critical",
+      "is_synthetic": true
+    },
+    "ben_synth_investment_scam_04": {
+      "risk_category": "investment_scam_hub",
+      "flagged_date": "2026-11-04",
+      "reporting_source": "mock_victim_reports",
+      "confidence": "high",
+      "is_synthetic": true
+    },
+    "ben_synth_kyc_phish_05": {
+      "risk_category": "kyc_coercion",
+      "flagged_date": "2026-11-07",
+      "reporting_source": "mock_bank_consortium",
+      "confidence": "critical",
+      "is_synthetic": true
+    }
+  }
+}
