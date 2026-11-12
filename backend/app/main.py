@@ -2,7 +2,9 @@
 
 from fastapi import FastAPI
 
+from app.api.guardian import router as guardian_router
 from app.api.health import router as health_router
+from app.api.payments import router as payments_router
 from app.auth.router import router as auth_router
 from app.config import Settings, load_settings
 from app.models.database import SessionFactory
@@ -20,6 +22,8 @@ def create_app(
     application.state.session_factory = session_factory
     application.include_router(health_router, prefix="/api/v2")
     application.include_router(auth_router)
+    application.include_router(guardian_router)
+    application.include_router(payments_router)
     return application
 
 

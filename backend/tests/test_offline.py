@@ -58,7 +58,16 @@ try:
     assert not Base.metadata.tables
     from app.models.metadata import metadata
     assert set(metadata.tables) == {'users', 'role_bindings', 'accounts', 'safe_lock_states'}
-    assert set(app.openapi()['paths']) == {'/api/v2/health', '/api/v2/profile'}
+    expected_routes = {
+        '/api/v2/health', '/api/v2/profile',
+        '/api/v2/guardian/enroll', '/api/v2/guardian/status', '/api/v2/guardian/revoke',
+        '/api/v2/guardian/calls/{call_id}/status', '/api/v2/guardian/calls/provider-callback',
+        '/api/v2/payments', '/api/v2/payments/{payment_id}',
+        '/api/v2/payments/{payment_id}/guardian/decision',
+        '/api/v2/payments/{payment_id}/fallback/activate',
+        '/api/v2/payments/{payment_id}/confirm',
+    }
+    assert set(app.openapi()['paths']) == expected_routes
     print('guarded cold import passed')
 finally:
     cleanup()

@@ -118,8 +118,10 @@ def get_authoritative_guardian_for_payer(
     """
     if not isinstance(payer_id, UUID):
         return None
-    store = SYNTHETIC_GUARDIAN_ENROLLMENTS if enrollments is None else enrollments
-    return store.get(payer_id)
+    if enrollments is not None:
+        return enrollments.get(payer_id)
+    from app.services.guardian_service import get_guardian_service
+    return get_guardian_service().get_guardian_for_payer(payer_id)
 
 
 def resolve_synthetic_token(
