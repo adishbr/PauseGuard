@@ -4,7 +4,7 @@ import os
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 
 class ConfigurationError(ValueError):
@@ -12,22 +12,46 @@ class ConfigurationError(ValueError):
 
 
 class Settings(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+        populate_by_name=True,
+    )
 
     environment: Literal["local", "test"] = "local"
     mode: Literal["mock"] = "mock"
+    allow_demo_auth: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("allow_demo_auth", "enable_demo_auth"),
+    )
+
+    @property
+    def enable_demo_auth(self) -> bool:
+        return self.allow_demo_auth
+
+
+def _parse_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
-    """Read only the two supported, non-secret variables; allow injected mappings.
+    """Read supported, non-secret variables; allow injected mappings.
 
     Database environment variables and backend/.env are deliberately not read.
     Production operation is outside this foundation's scope.
     """
     source = os.environ if environ is None else environ
+    demo_auth_raw = source.get("PAUSEGUARD_ALLOW_DEMO_AUTH")
+    if demo_auth_raw is None:
+        demo_auth_raw = source.get("PAUSEGUARD_ENABLE_DEMO_AUTH")
+
     values = {
         "environment": source.get("PAUSEGUARD_ENVIRONMENT", "local"),
         "mode": source.get("PAUSEGUARD_MODE", "mock"),
+        "allow_demo_auth": _parse_bool(demo_auth_raw),
     }
     try:
         return Settings.model_validate(values)

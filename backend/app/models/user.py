@@ -9,17 +9,11 @@ from sqlalchemy import DateTime, Enum, ForeignKey, PrimaryKeyConstraint, Uuid, f
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.database import Base
+from app.models.roles import UserRole
 
 if TYPE_CHECKING:
     from app.models.account import MockAccount
     from app.models.safe_lock import SafeLockState
-
-
-class UserRole(StrEnum):
-    PAYER = "payer"
-    GUARDIAN = "guardian"
-    ANALYST = "analyst"
-    ADMIN = "admin"
 
 
 class SyntheticUser(Base):
