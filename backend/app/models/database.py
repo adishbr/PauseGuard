@@ -11,7 +11,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
 class Base(DeclarativeBase):
-    """Empty registry reserved for a separately authorized persistence phase."""
+    """Shared registry; importing this infrastructure does not register models."""
 
 
 class DatabaseConfigurationError(ValueError):

@@ -16,11 +16,12 @@ def create_app():
 
 
 def test_creation_and_lifespan_need_no_database(create_app):
+    registered_before = set(Base.metadata.tables)
     application = create_app(Settings(environment="test"))
     with TestClient(application) as client:
         assert client.get("/api/v2/health").status_code == 200
     assert application.state.session_factory is None
-    assert not Base.metadata.tables
+    assert set(Base.metadata.tables) == registered_before
 
 
 def test_module_reload_does_not_connect(monkeypatch):
