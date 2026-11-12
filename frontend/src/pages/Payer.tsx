@@ -109,13 +109,14 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountI
   const isSupplierNew = beneficiary === 'supplier_new'
 
   const forecastTier = isFlagged ? 3 : isCoercion ? 3 : isSupplierNew ? 1 : 0
+  const forecastTone = isFlagged ? 'danger' : forecastTier > 0 ? 'caution' : 'neutral'
   const forecastLabel = isFlagged
-    ? 'Hard Block (Tier 3) — Known Fraud Entity'
+    ? 'Flagged recipient'
     : isCoercion
-      ? 'Guardian Circuit Breaker (Tier 3) — High Coercion Risk'
+      ? 'Possible coercion risk'
       : isSupplierNew
-        ? 'Step-Up Verification (Tier 1) — Unverified Recipient'
-        : 'Direct Clearance (Tier 0) — Standard Routine Transfer'
+        ? 'Unfamiliar recipient'
+        : 'Routine payment details'
 
   const quickAmounts = ['100.00', '5000.00', '50000.00', '55000.00']
 
@@ -130,27 +131,27 @@ function PaymentForm({ locale, onCreated, focusHeading, reviewDuration, accountI
             <h2 id="payment-heading" ref={heading} tabIndex={-1}>{t('preparePayment')}</h2>
           </div>
           <span className="pill neutral header-tag">
-            <Icon name="shieldCheck" size={14} /> Mock UPI Rail
+            <Icon name="shieldCheck" size={14} /> Payment preview
           </span>
         </div>
         <p className="card-lead">{t('formHint')}</p>
 
         {/* Real-time Dynamic Policy Forecast Banner */}
-        <div className={`policy-forecast-banner tier-${forecastTier}`}>
+        <div className={`policy-forecast-banner forecast-${forecastTone}`}>
           <div className="forecast-icon">
             <Icon name={forecastTier === 3 ? 'shieldAlert' : forecastTier === 1 ? 'alertTriangle' : 'shieldCheck'} size={18} />
           </div>
           <div className="forecast-copy">
-            <span className="forecast-badge">Dynamic Policy Forecast</span>
+            <span className="forecast-badge">What to expect</span>
             <strong>{forecastLabel}</strong>
             <p className="field-help">
               {forecastTier === 3
                 ? isFlagged
-                  ? 'System will refuse execution and alert fraud operations.'
-                  : `Triggers mandatory ${reviewDuration}s independent guardian review.`
+                  ? 'Checking this example should show a blocked payment.'
+                  : `A review may be needed. Your selected response window is ${reviewDuration} seconds.`
                 : forecastTier === 1
-                  ? 'Payer will receive an actionable step-up verification prompt.'
-                  : 'Transaction will proceed directly without requiring human guardian review.'}
+                  ? 'You may see a warning and steps to check the recipient.'
+                  : 'Check the payment to see the outcome before you confirm.'}
             </p>
           </div>
         </div>

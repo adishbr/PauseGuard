@@ -15,7 +15,7 @@ async function setup(t, options, sample = true) {
   t.after(() => browser.close())
   const context = await browser.newContext(options)
   const payer = await context.newPage()
-  await payer.goto(origin)
+  await payer.goto(origin + '/payer')
   if (sample) {
     await payer.getByRole('button', { name: 'Open sample payer' }).click()
     await payer.getByRole('heading', { name: 'Prepare a payment' }).waitFor()
@@ -24,20 +24,89 @@ async function setup(t, options, sample = true) {
 }
 
 async function openReview(payer) {
-  const [guardian] = await Promise.all([
-    payer.waitForEvent('popup'),
-    payer.getByRole('link', { name: 'Open guardian window' }).click(),
-  ])
+  const guardian = await payer.context().newPage()
+  await guardian.goto(origin + '/guardian/login')
   await guardian.getByRole('button', { name: 'Open sample guardian' }).click()
   await guardian.getByText('Waiting for a review request').waitFor()
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Waiting for your guardian' }).waitFor()
   await guardian.getByRole('button', { name: 'Open review' }).click()
   await guardian.getByRole('heading', { name: 'Review requested' }).waitFor()
+  await assertFrosted(guardian.locator('.status-card'))
   return guardian
 }
 
 const completion = (page) => page.getByRole('heading', { name: 'Simulated payment completed' })
+
+async function assertFrosted(panel) {
+  assert.match(await panel.evaluate((element) => getComputedStyle(element).backdropFilter), /blur/)
+}
+
+test('public landing and distinct sign-in routes work on mobile without motion', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t, { viewport: { width: 360, height: 780 }, reducedMotion: 'reduce' }, false)
+  await payer.goto(origin)
+  await payer.getByRole('heading', { name: 'A pause can protect a payment.' }).waitFor()
+  assert.equal(await payer.getByLabel('Email or mobile').count(), 0)
+  assert.equal(await payer.evaluate(() => document.documentElement.scrollWidth), 360)
+
+  const lock = payer.locator('.woven-lock canvas[data-ready=true]')
+  const firstFrame = await lock.screenshot()
+  assert.deepEqual(await lock.screenshot(), firstFrame)
+
+  await payer.getByRole('main').getByRole('link', { name: 'Get started' }).click()
+  await payer.getByRole('heading', { name: 'Create your preview account' }).waitFor()
+  assert.equal(new URL(payer.url()).pathname, '/payer/signup')
+  await payer.goto(origin)
+  await payer.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Guardian portal' }).click()
+  await payer.getByRole('heading', { name: 'Sign in', exact: true }).waitFor()
+  assert.equal(new URL(payer.url()).pathname, '/guardian/login')
+  assert.equal(await payer.getByRole('button', { name: 'Open sample payer' }).count(), 0)
+})
+
+test('sign-in is centered frosted glass and the payer shares the homepage accent', { timeout: 20_000 }, async (t) => {
+  const { payer } = await setup(t, { viewport: { width: 1440, height: 900 } }, false)
+  await payer.goto(origin)
+  const logIn = payer.getByRole('link', { name: 'Log in', exact: true })
+  const publicAccent = await payer.getByRole('banner').getByRole('link', { name: 'Get started' })
+    .evaluate((link) => getComputedStyle(link).backgroundColor)
+  await logIn.click()
+
+  const card = payer.getByRole('region', { name: 'Sign in', exact: true })
+  const style = await card.evaluate((panel) => {
+    const bounds = panel.getBoundingClientRect()
+    const stage = panel.parentElement.getBoundingClientRect()
+    return {
+      backdrop: getComputedStyle(panel).backdropFilter,
+      xOffset: (bounds.left + bounds.right - stage.left - stage.right) / 2,
+      yOffset: (bounds.top + bounds.bottom - stage.top - stage.bottom) / 2,
+    }
+  })
+  assert.match(style.backdrop, /blur/)
+  assert.ok(Math.abs(style.xOffset) < 1 && Math.abs(style.yOffset) < 1)
+
+  await payer.getByRole('button', { name: 'Open sample payer' }).click()
+  const payment = payer.getByRole('button', { name: 'Check payment', exact: true })
+  assert.equal(await payment.evaluate((button) => getComputedStyle(button).backgroundColor), publicAccent)
+  await assertFrosted(payer.locator('.payment-engine-card'))
+  await assertFrosted(payer.locator('.payment-steps'))
+  await assertFrosted(payer.getByRole('region', { name: 'Payment Protection Settings' }))
+
+  const guardian = await payer.context().newPage()
+  await guardian.goto(origin + '/guardian/login')
+  await guardian.getByRole('button', { name: 'Open sample guardian' }).click()
+  const radar = await guardian.locator('.inbox-icon-container').boundingBox()
+  assert.ok(Math.abs(radar.width - radar.height) < 1)
+  await assertFrosted(guardian.locator('.guardian-workspace-card'))
+})
+
+test('the admin entry still sends a signed-out visitor to admin login', { timeout: 15_000 }, async (t) => {
+  const { payer } = await setup(t, undefined, false)
+  await payer.goto(origin + '/admin')
+  await payer.waitForURL('**/admin/login')
+  await payer.getByRole('heading', { name: /admin/i }).waitFor()
+  await assertFrosted(payer.locator('.admin-login-card'))
+  assert.equal(await payer.getByRole('button', { name: 'Open sample payer' }).count(), 0)
+})
 
 test('same-browser windows approve a redacted review, reconnect, then confirm once', { timeout: 25_000 }, async (t) => {
   const { payer } = await setup(t)
@@ -170,6 +239,11 @@ test('mobile keyboard entry and retry preserve the original creation key after a
   await amount.focus()
   await payer.keyboard.press('ControlOrMeta+a')
   await payer.keyboard.type('100.05')
+  const presets = payer.getByRole('group', { name: 'Preset amount shortcuts' }).getByRole('button')
+  for (const preset of await presets.all()) {
+    await payer.keyboard.press('Tab')
+    assert.equal(await preset.evaluate((button) => button === document.activeElement), true)
+  }
   await payer.keyboard.press('Tab')
   assert.equal(await payer.evaluate(() => document.activeElement.name), 'beneficiary')
 
@@ -244,6 +318,7 @@ test('warning guidance and a lost confirmation response resolve to the authorita
   await payer.getByRole('button', { name: 'Unfamiliar supplier' }).click()
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Review this payment' }).waitFor()
+  await assertFrosted(payer.locator('.status-card.tone-caution'))
   assert.equal(await payer.locator('[aria-current="step"]').innerText(), '02\nReview')
   await payer.getByText('How to verify the request', { exact: true }).click()
   await payer.getByText(/Contact the recipient using a saved number/).waitFor()
@@ -259,6 +334,7 @@ test('warning guidance and a lost confirmation response resolve to the authorita
   })
   await payer.getByRole('button', { name: 'Confirm simulated payment' }).click()
   await completion(payer).waitFor()
+  await assertFrosted(payer.locator('.status-card'))
   assert.equal(confirmationPosts, 1)
   assert.equal(await payer.locator('[aria-current="step"]').innerText(), '03\nOutcome')
   assert.equal(await payer.getByRole('alert').count(), 0)
@@ -290,6 +366,7 @@ test('flagged demo recipient is rejected without opening a guardian request', { 
   await payer.getByRole('button', { name: 'Flagged recipient' }).click()
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Payment rejected' }).waitFor()
+  await assertFrosted(payer.locator('.status-card.tone-danger'))
   await payer.getByText(/A safety rule stopped this request/).waitFor()
   assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
   assert.equal(await payer.evaluate(() => localStorage.getItem('pauseguard:demo:guardian-request')), null)
@@ -342,13 +419,10 @@ test('new payer onboards on mobile, edits profile, and signs back in', { timeout
   await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
   await payer.getByRole('heading', { name: 'Payment rejected' }).waitFor()
   await payer.getByRole('button', { name: 'Sign out' }).click()
-  await payer.getByRole('link', { name: 'Sign in', exact: true }).click()
-  await payer.getByText('Password interface preview').click()
-  await payer.getByRole('button', { name: 'Show example password' }).click()
-  assert.equal(await payer.getByLabel('Example password').getAttribute('readonly'), '')
-  assert.equal(await payer.getByLabel('Example password').getAttribute('type'), 'text')
+  await payer.getByRole('heading', { name: 'Sign in', exact: true }).waitFor()
+  assert.equal(new URL(payer.url()).pathname, '/payer/login')
   await payer.getByLabel('Email or mobile').fill(contact)
-  await payer.getByRole('button', { name: 'Sign in to demo' }).click()
+  await payer.getByRole('button', { name: 'Sign in to preview' }).click()
   await payer.getByText('Signed in as Edited Demo').waitFor()
 
   const token = await payer.evaluate(() => sessionStorage.getItem('pauseguard:demo:session:payer'))
