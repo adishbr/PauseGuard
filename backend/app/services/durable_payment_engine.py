@@ -10,6 +10,7 @@ Enforces:
 7. Strict role boundaries: Guardians cannot execute payments.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -74,6 +75,18 @@ from app.services.transactions import transaction_scope
 GENESIS_HASH = "0" * 64
 HIGH_RISK_THRESHOLD_PAISE = 5000000  # ₹50,000
 AUDIT_CHAIN_ADVISORY_LOCK_ID = 74920491823
+
+
+@dataclass(frozen=True)
+class GuardianLateDecisionOutcome:
+    """Sentinel outcome returned when guardian decision arrives after deadline.
+
+    The API route converts this to HTTP 409 without triggering transaction rollback,
+    allowing the get_payment_engine dependency to commit state and audit atomically.
+    """
+
+    payment_id: str
+    status: str
 
 
 def _compute_hash(prev_hash: str, event_type: str, payment_id: Optional[str], actor_id: UUID, payload: dict) -> str:
@@ -340,7 +353,7 @@ class DurablePaymentEngine:
         actor: TrustedActorContext,
         payment_id: str,
         request: GuardianDecisionRequest,
-    ) -> PaymentDecisionResponse:
+    ) -> Union[PaymentDecisionResponse, GuardianLateDecisionOutcome]:
         """Record authenticated guardian decision with row-level locking and deadline enforcement."""
         payment = self.session.scalars(payment_for_update(payment_id)).one_or_none()
         if not payment:
@@ -392,9 +405,9 @@ class DurablePaymentEngine:
                 payment_id=payment.id,
                 payload={"deadline": payment.guardian_deadline.isoformat()},
             )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Guardian response deadline has expired; payment transitioned to fallback review",
+            return GuardianLateDecisionOutcome(
+                payment_id=payment.id,
+                status=payment.status,
             )
 
         target_status = (

@@ -855,3 +855,549 @@ def test_concurrent_cancellation_and_confirmation_are_serialized(
             pytest.fail(
                 f"Unexpected final payment state: {final_payment.status}"
             )
+
+
+class TestGuardianDeadlineTransaction:
+    """Regression tests for guardian deadline transaction fix.
+
+    Verifies that guardian decisions arriving after the 30-second deadline
+    transition the payment to AWAITING_FALLBACK_REVIEW, record exactly one
+    GUARDIAN_DEADLINE_EXPIRED audit event, and return HTTP 409 through the
+    normal response path without transaction rollback.
+    """
+
+    def _create_awaiting_guardian_payment(
+        self,
+        session: Session,
+        payer_id: UUID,
+        guardian_id: UUID,
+        deadline: datetime,
+        amount_paise: int = 250_000,
+    ) -> str:
+        """Create a synthetic high-risk payment awaiting guardian review."""
+        _seed_test_payer(session, payer_id, initial_balance=100_000_000)
+        _seed_test_guardian(session, guardian_id)
+
+        from app.services.guardian_service import (
+            EnrollmentRecord,
+            GuardianIdentityEvidence,
+            get_guardian_service,
+        )
+        gs = get_guardian_service()
+        with gs._lock:
+            gs._verified_identities[guardian_id] = GuardianIdentityEvidence(
+                guardian_id=guardian_id,
+                is_verified=True,
+                method="trusted_backend_verification",
+            )
+            gs._enrollments[payer_id] = EnrollmentRecord(
+                enrollment_id=uuid4(),
+                payer_id=payer_id,
+                guardian_id=guardian_id,
+                relationship="family",
+                notification_channel="in_app",
+                status="active",
+                enrolled_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+        payment_id = f"pg_{uuid4().hex[:16]}"
+        payment = Payment(
+            id=payment_id,
+            payer_id=payer_id,
+            beneficiary_id="vendor_deadline_test",
+            amount_paise=amount_paise,
+            purpose="guardian deadline regression test",
+            status=PaymentStatus.AWAITING_GUARDIAN.value,
+            tier=3,
+            risk_score=90,
+            reason_codes=["RC_LARGE_AMOUNT_DEVIATION"],
+            idempotency_key=f"idem_deadline_{uuid4().hex[:8]}",
+            assigned_guardian_id=guardian_id,
+            guardian_deadline=deadline,
+            version=1,
+        )
+        session.add(payment)
+        session.commit()
+        return payment_id
+
+    # ------------------------------------------------------------------
+    # 1-2: Approval / rejection before deadline
+    # ------------------------------------------------------------------
+
+    def test_guardian_approval_before_deadline_transitions_to_ready_to_execute(
+        self, pg_session: Session
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Approved before deadline")
+
+        with transaction_scope(pg_session):
+            resp = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        assert resp.status == PaymentStatus.READY_TO_EXECUTE.value
+        assert resp.can_execute_payment is False
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.READY_TO_EXECUTE.value
+        assert persisted.version == 2
+
+    def test_guardian_rejection_before_deadline_transitions_to_rejected(
+        self, pg_session: Session
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=False, notes="Rejected before deadline")
+
+        with transaction_scope(pg_session):
+            resp = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        assert resp.status == PaymentStatus.REJECTED.value
+        assert resp.can_execute_payment is False
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.REJECTED.value
+        assert persisted.version == 2
+
+    # ------------------------------------------------------------------
+    # 3-4: Approval / rejection after deadline
+    # ------------------------------------------------------------------
+
+    def test_guardian_approval_after_deadline_transitions_to_fallback(
+        self, pg_session: Session
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),  # Expired
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late approval attempt")
+
+        with transaction_scope(pg_session):
+            result = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+        assert isinstance(result, GuardianLateDecisionOutcome)
+        assert result.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+        assert persisted.version == 2
+
+    def test_guardian_rejection_after_deadline_transitions_to_fallback(
+        self, pg_session: Session
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),  # Expired
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=False, notes="Late rejection attempt")
+
+        with transaction_scope(pg_session):
+            result = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+        assert isinstance(result, GuardianLateDecisionOutcome)
+        assert result.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+        assert persisted.version == 2
+
+    # ------------------------------------------------------------------
+    # 5-6: HTTP 409 on late response; fallback state survives commit
+    # ------------------------------------------------------------------
+
+    def test_http_409_on_late_response_through_api_route(
+        self, pg_session: Session
+    ) -> None:
+        """API route returns JSONResponse(409) for late guardian decision."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late attempt")
+
+        result = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+        assert isinstance(result, GuardianLateDecisionOutcome)
+
+        from fastapi.responses import JSONResponse
+        from fastapi import status
+        response = JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": "Guardian response deadline has expired; payment transitioned to fallback review",
+                "payment_id": result.payment_id,
+                "status": result.status,
+            },
+        )
+        assert response.status_code == 409
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+
+    def test_fallback_state_survives_database_commit(
+        self, pg_session: Session, pg_session_factory: sessionmaker[Session]
+    ) -> None:
+        """Fallback transition persists after the transaction owner commits."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+
+        with transaction_scope(pg_session):
+            engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        with pg_session_factory() as fresh_session:
+            persisted = fresh_session.get(Payment, payment_id)
+            assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+            assert persisted.version == 2
+
+    # ------------------------------------------------------------------
+    # 7: Exactly one expiry audit event
+    # ------------------------------------------------------------------
+
+    def test_exactly_one_expiry_audit_event(self, pg_session: Session) -> None:
+        """Only one GUARDIAN_DEADLINE_EXPIRED audit event recorded for late decision."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+
+        with transaction_scope(pg_session):
+            engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        expiry_events = pg_session.query(AuditEvent).filter(
+            AuditEvent.payment_id == payment_id,
+            AuditEvent.event_type == "GUARDIAN_DEADLINE_EXPIRED",
+        ).all()
+
+        assert len(expiry_events) == 1
+        assert expiry_events[0].actor_id == guardian_id
+        assert "deadline" in expiry_events[0].payload_json
+
+    # ------------------------------------------------------------------
+    # 8: Invalid guardian rejected
+    # ------------------------------------------------------------------
+
+    def test_invalid_guardian_rejected(self, pg_session: Session) -> None:
+        """Guardian not assigned to payment gets 403 Forbidden."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        unrelated_user_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+
+        actor = TrustedActorContext(
+            user_id=unrelated_user_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Unauthorized guardian")
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        assert exc_info.value.status_code == 403
+
+    # ------------------------------------------------------------------
+    # 9: Duplicate decisions rejected
+    # ------------------------------------------------------------------
+
+    def test_duplicate_decisions_rejected(self, pg_session: Session) -> None:
+        """Second guardian decision on same payment gets 409 Conflict."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="First decision")
+
+        with transaction_scope(pg_session):
+            resp1 = engine.record_guardian_decision(actor, payment_id, dec_req)
+        assert resp1.status == PaymentStatus.READY_TO_EXECUTE.value
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        assert exc_info.value.status_code == 409
+
+    # ------------------------------------------------------------------
+    # 10: Concurrent fallback and late decision
+    # ------------------------------------------------------------------
+
+    def test_concurrent_fallback_and_late_decision(self, pg_session_factory: sessionmaker[Session]) -> None:
+        """Concurrent fallback activation and late guardian decision handled deterministically."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+
+        with pg_session_factory() as seed_session:
+            payment_id = self._create_awaiting_guardian_payment(
+                seed_session, payer_id, guardian_id,
+                datetime.now(timezone.utc) - timedelta(seconds=5),
+            )
+
+        results = []
+
+        def attempt_fallback() -> tuple[str, int | None]:
+            with pg_session_factory() as session:
+                try:
+                    with transaction_scope(session):
+                        actor = TrustedActorContext(
+                            user_id=payer_id,
+                            roles=frozenset({UserRole.PAYER}),
+                        )
+                        resp = DurablePaymentEngine(session).activate_fallback(actor, payment_id)
+                    return ("success", None)
+                except HTTPException as exc:
+                    return ("conflict", exc.status_code)
+
+        def attempt_late_decision() -> tuple[str, int | None]:
+            with pg_session_factory() as session:
+                try:
+                    with transaction_scope(session):
+                        actor = TrustedActorContext(
+                            user_id=guardian_id,
+                            roles=frozenset({UserRole.GUARDIAN}),
+                        )
+                        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+                        result = DurablePaymentEngine(session).record_guardian_decision(
+                            actor, payment_id, dec_req
+                        )
+                        return ("success", None)
+                except HTTPException as exc:
+                    return ("conflict", exc.status_code)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fallback_future = executor.submit(attempt_fallback)
+            decision_future = executor.submit(attempt_late_decision)
+            fallback_result = fallback_future.result(timeout=30)
+            decision_result = decision_future.result(timeout=30)
+
+        successful = [r for r in [fallback_result, decision_result] if r[0] == "success"]
+        assert len(successful) == 1, f"Expected exactly one success, got {successful}"
+
+        with pg_session_factory() as session:
+            session.expire_all()
+            persisted = session.get(Payment, payment_id)
+            assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+
+    # ------------------------------------------------------------------
+    # 11-13: Safe-Lock enforced, no balance changes, no automatic execution
+    # ------------------------------------------------------------------
+
+    def test_safe_lock_remains_enforced_after_timeout(self, pg_session: Session) -> None:
+        """Safe-Lock fail-closed still applies after deadline expiry."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        from app.models.safe_lock import SafeLockState
+        safe_lock = pg_session.query(SafeLockState).filter(
+            SafeLockState.payer_id == payer_id
+        ).one()
+        safe_lock.is_locked = True
+        pg_session.commit()
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+
+        with transaction_scope(pg_session):
+            result = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+        assert isinstance(result, GuardianLateDecisionOutcome)
+
+        payer_actor = TrustedActorContext(
+            user_id=payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                engine.confirm_payment(
+                    payer_actor, payment_id,
+                    PaymentConfirmRequest(idempotency_key=f"confirm_locked_{uuid4().hex[:8]}"),
+                )
+        assert exc_info.value.status_code == 423
+        assert "Safe-Lock" in exc_info.value.detail
+
+    def test_no_balance_changes_after_timeout(self, pg_session: Session) -> None:
+        """No ledger entries created after deadline expiry."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+            amount_paise=500_000,
+        )
+
+        from app.models.ledger import LedgerEntry
+        from app.services.foundation_queries import ledger_entries_for_payment
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+
+        with transaction_scope(pg_session):
+            engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        ledger_entries = pg_session.scalars(
+            ledger_entries_for_payment(payment_id)
+        ).all()
+        assert len(ledger_entries) == 0
+
+        account = pg_session.query(MockAccount).filter(
+            MockAccount.owner_id == payer_id
+        ).one()
+        assert account.balance_paise == 100_000_000
+
+    def test_no_automatic_payment_execution_after_timeout(self, pg_session: Session) -> None:
+        """Payment is not automatically executed after guardian deadline expiry."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+        dec_req = GuardianDecisionRequest(approved=True, notes="Late")
+
+        with transaction_scope(pg_session):
+            result = engine.record_guardian_decision(actor, payment_id, dec_req)
+
+        from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+        assert isinstance(result, GuardianLateDecisionOutcome)
+
+        pg_session.expire_all()
+        persisted = pg_session.get(Payment, payment_id)
+        assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+        assert persisted.status != PaymentStatus.EXECUTED.value
+
+    # ------------------------------------------------------------------
+    # 14: Existing payment idempotency
+    # ------------------------------------------------------------------
+
+    def test_existing_payment_idempotency_after_timeout(self, pg_session: Session) -> None:
+        """Idempotency key still enforced after deadline expiry."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session, payer_id, guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+        engine = DurablePaymentEngine(pg_session)
+
+        from app.auth.schemas import PaymentCreateRequest
+        req2 = PaymentCreateRequest(
+            beneficiary_id="vendor_new",
+            amount_paise=200_000,
+            purpose="new payment after timeout",
+            idempotency_key=f"idem_new_{uuid4().hex[:8]}",
+        )
+
+        with transaction_scope(pg_session):
+            view = engine.create_payment(actor, req2)
+
+        assert view.id.startswith("pg_")
+        assert view.status in (
+            PaymentStatus.READY_TO_EXECUTE.value,
+            PaymentStatus.AWAITING_GUARDIAN.value,
+        )

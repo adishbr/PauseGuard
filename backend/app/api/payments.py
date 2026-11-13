@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any, Union
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_actor
@@ -253,13 +254,31 @@ def submit_guardian_decision(
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     request: GuardianDecisionRequest,
     engine: Annotated[Any, Depends(get_payment_engine)],
-) -> PaymentDecisionResponse:
+) -> Union[PaymentDecisionResponse, JSONResponse]:
     """Submit an authenticated guardian decision for a payment awaiting review.
 
     Enforces 30-second server deadline, anti-replay, and the invariant that
     guardian approval NEVER executes payments.
+
+    If the guardian decision arrives after the deadline, the engine transitions
+    the payment to AWAITING_FALLBACK_REVIEW and records a
+    GUARDIAN_DEADLINE_EXPIRED audit event in the same transaction. The API route
+    returns HTTP 409 through the normal response path without raising an
+    exception, allowing the get_payment_engine dependency to commit state and
+    audit atomically.
     """
     res = engine.submit_guardian_decision(actor, payment_id, request)
+    # Lazy import to avoid registering SQLAlchemy models on Base.metadata at app creation time.
+    from app.services.durable_payment_engine import GuardianLateDecisionOutcome
+    if isinstance(res, GuardianLateDecisionOutcome):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": "Guardian response deadline has expired; payment transitioned to fallback review",
+                "payment_id": res.payment_id,
+                "status": res.status,
+            },
+        )
     broadcast_event_sync(
         payment_id=res.payment_id,
         event_type="GUARDIAN_DECISION",
