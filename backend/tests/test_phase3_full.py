@@ -885,3 +885,41 @@ def test_concurrent_guardian_revocation_vs_authorization(client):
 
     assert revocation_status[0] == 200
     assert decision_status[0] in (200, 403)
+
+
+def test_guardian_cannot_replay_payer_confirm_idempotency_key(client):
+    """Non-payers must be rejected (403) even if they replay the payer's confirm idempotency_key."""
+    create_resp = client.post(
+        "/api/v2/payments",
+        json={
+            "beneficiary_id": "merchant_safe_replay",
+            "amount_paise": 5500000,
+            "purpose": "kyc_verification",
+            "idempotency_key": "key_replay_create_01",
+        },
+        headers=auth_header("demo-token-payer"),
+    )
+    assert create_resp.status_code == 201
+    payment_id = create_resp.json()["id"]
+
+    dec_resp = client.post(
+        f"/api/v2/payments/{payment_id}/guardian/decision",
+        json={"approved": True},
+        headers=auth_header("demo-token-guardian"),
+    )
+    assert dec_resp.status_code == 200
+
+    confirm_resp = client.post(
+        f"/api/v2/payments/{payment_id}/confirm",
+        json={"idempotency_key": "key_replay_confirm_01"},
+        headers=auth_header("demo-token-payer"),
+    )
+    assert confirm_resp.status_code == 200
+
+    guardian_replay = client.post(
+        f"/api/v2/payments/{payment_id}/confirm",
+        json={"idempotency_key": "key_replay_confirm_01"},
+        headers=auth_header("demo-token-guardian"),
+    )
+    assert guardian_replay.status_code == 403
+

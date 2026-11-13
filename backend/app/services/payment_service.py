@@ -451,18 +451,18 @@ class PaymentService:
     ) -> PaymentConfirmResponse:
         """Confirm final payment execution by the authenticated owning payer."""
         with self._lock:
-            # Check confirmation idempotency first
-            cached_confirm = self._confirm_idempotency_map.get((payment_id, request.idempotency_key))
-            if cached_confirm is not None:
-                return cached_confirm
-
             record = self._payments.get(payment_id)
             if record is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
 
-            # Check owning payer
+            # Check owning payer before idempotency replay so non-payers cannot probe/replay receipts
             if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
                 raise AuthorizationError("Forbidden: Only the authenticated owning payer can execute payment")
+
+            # Check confirmation idempotency
+            cached_confirm = self._confirm_idempotency_map.get((payment_id, request.idempotency_key))
+            if cached_confirm is not None:
+                return cached_confirm
 
             # Reject if already terminal
             if record.status == PaymentStatus.EXECUTED:

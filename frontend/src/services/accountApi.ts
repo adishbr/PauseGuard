@@ -347,6 +347,15 @@ export const accountApi = {
       return request<{ id: string | null }>(demoAccountPath, `/reviews?reference=${encodeURIComponent(reference)}`, token)
     }
     try {
+      if (!reference) {
+        const dashboard = await request<{ pending_reviews?: Array<{ id?: string }> }>(
+          '/api/v2',
+          '/guardian/dashboard',
+          token,
+        )
+        const pendingId = dashboard.pending_reviews?.[0]?.id
+        return { id: typeof pendingId === 'string' && pendingId ? pendingId : null }
+      }
       await request('/api/v2', `/payments/${encodeURIComponent(reference)}`, token)
       return { id: reference }
     } catch (error) {
