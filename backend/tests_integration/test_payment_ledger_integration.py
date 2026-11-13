@@ -1401,3 +1401,52 @@ class TestGuardianDeadlineTransaction:
             PaymentStatus.READY_TO_EXECUTE.value,
             PaymentStatus.AWAITING_GUARDIAN.value,
         )
+
+    def test_guardian_cannot_replay_payer_confirm_idempotency_key_in_postgresql(
+        self, pg_session: Session
+    ) -> None:
+        """Guardian replaying payer's confirm idempotency_key must receive 403 Forbidden."""
+        payer_id = uuid4()
+        guardian_id = uuid4()
+        _seed_test_payer(pg_session, payer_id, initial_balance=50_000_000)
+        _seed_test_guardian(pg_session, guardian_id)
+
+        payment_id = f"pg_{uuid4().hex[:16]}"
+        payment = Payment(
+            id=payment_id,
+            payer_id=payer_id,
+            beneficiary_id="vendor_confirm_replay",
+            amount_paise=1_000_000,
+            purpose="routine purchase",
+            status=PaymentStatus.READY_TO_EXECUTE.value,
+            tier=0,
+            risk_score=10,
+            idempotency_key=f"idem_create_{uuid4().hex[:8]}",
+            version=1,
+        )
+        pg_session.add(payment)
+        pg_session.commit()
+
+        payer_actor = TrustedActorContext(
+            user_id=payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+        guardian_actor = TrustedActorContext(
+            user_id=guardian_id,
+            roles=frozenset({UserRole.GUARDIAN}),
+        )
+        confirm_key = f"confirm_replay_{uuid4().hex[:8]}"
+        engine = DurablePaymentEngine(pg_session)
+
+        with transaction_scope(pg_session):
+            resp = engine.confirm_payment(
+                payer_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
+            )
+        assert resp.status == PaymentStatus.EXECUTED.value
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                engine.confirm_payment(
+                    guardian_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
+                )
+        assert exc_info.value.status_code == 403
