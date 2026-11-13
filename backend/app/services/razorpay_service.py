@@ -1,4 +1,4 @@
-"""Authoritative backend service for Razorpay Test Mode merchant sandbox operations.
+﻿"""Authoritative backend service for Razorpay Test Mode merchant sandbox operations.
 
 SECURITY INVARIANTS:
 1. Test Mode isolation: Operates strictly with Test Mode credentials (rzp_test_*).
@@ -438,9 +438,14 @@ class RazorpayMerchantService:
                 detail="Malformed webhook JSON payload",
             )
 
+        if not isinstance(event_data, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Webhook JSON payload must be an object",
+            )
         event_id = event_data.get("id")
         event_type = event_data.get("event")
-        if not event_id or not isinstance(event_id, str):
+        if not isinstance(event_id, str) or not event_id.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Webhook event payload missing unique event ID",
