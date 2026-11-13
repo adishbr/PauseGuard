@@ -1,12 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Icon } from '../components/Icon.tsx'
 import { accountApi } from '../services/accountApi.ts'
+import type { V5GuardianInvitation, V5GuardianInvitationList, V5IdentityAssurance } from '../services/accountApi.ts'
+import { isRealBackendMode } from '../services/backendMode.ts'
 import { demoContact, demoName, relationships } from '../types/account.ts'
 import type { DemoProfile, EnrollmentView, Relationship } from '../types/account.ts'
 
 export function Enrollment({ profile, token }: { profile: DemoProfile; token: string }) {
   const payer = profile.role === 'payer'
+  const realV5 = isRealBackendMode() && !profile.sample
+
+  // Legacy demo state
   const [items, setItems] = useState<EnrollmentView[]>()
   const [enabled, setEnabled] = useState(false)
   const [name, setName] = useState('')
@@ -14,20 +19,201 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
   const [relationship, setRelationship] = useState<Relationship | ''>('')
   const [consent, setConsent] = useState(false)
   const [acceptance, setAcceptance] = useState<string[]>([])
+
+  // V5 Identity Assurance & Durable Invitations state
+  const [assurance, setAssurance] = useState<V5IdentityAssurance>()
+  const [kycName, setKycName] = useState(profile.name || '')
+  const [kycDocRef, setKycDocRef] = useState('')
+  const [kycConsent, setKycConsent] = useState(false)
+
+  const [invitations, setInvitations] = useState<V5GuardianInvitationList>()
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRel, setInviteRel] = useState<Relationship>('Family')
+  const [inviteSlot, setInviteSlot] = useState<'primary' | 'backup'>('primary')
+  const [inviteChannel, setInviteChannel] = useState<'in_app' | 'email' | 'push' | 'sms'>('in_app')
+  const [latestCreatedInvite, setLatestCreatedInvite] = useState<V5GuardianInvitation>()
+
+  // Guardian acceptance fields per invitation
+  const [acceptToken, setAcceptToken] = useState<Record<string, string>>({})
+  const [acceptChallengeId, setAcceptChallengeId] = useState<Record<string, string>>({})
+  const [acceptOtpPreview, setAcceptOtpPreview] = useState<Record<string, string>>({})
+  const [acceptOtpCode, setAcceptOtpCode] = useState<Record<string, string>>({})
+  const [acceptConsent, setAcceptConsent] = useState<Record<string, boolean>>({})
+
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [copiedLink, setCopiedLink] = useState(false)
   const acting = useRef(false)
 
+  const loadV5State = useCallback(async () => {
+    const [idStatus, invList] = await Promise.all([
+      accountApi.identityStatus(token),
+      accountApi.v5Invitations(token),
+    ])
+    setAssurance(idStatus)
+    setInvitations(invList)
+  }, [token])
+
   useEffect(() => {
     let active = true
-    void accountApi.enrollments(token).then(
-      (data) => { if (active) setItems(data) },
-      (failure) => { if (active) setError(failure.message) },
-    )
+    if (realV5) {
+      void Promise.all([
+        accountApi.identityStatus(token),
+        accountApi.v5Invitations(token),
+      ]).then(
+        ([idStatus, invList]) => {
+          if (!active) return
+          setAssurance(idStatus)
+          setInvitations(invList)
+        },
+        (failure) => { if (active) setError(failure instanceof Error ? failure.message : 'Failed to load enrollment state.') },
+      )
+    } else {
+      void accountApi.enrollments(token).then(
+        (data) => { if (active) setItems(data) },
+        (failure) => { if (active) setError(failure.message) },
+      )
+    }
     return () => { active = false }
-  }, [token])
+  }, [realV5, token])
+
+  async function verifyIdentity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (acting.current) return
+    setError('')
+    setMessage('')
+    if (!kycName.trim() || kycDocRef.trim().length < 4 || !kycConsent) {
+      setError('Enter your full legal name, synthetic document reference (4+ chars), and confirm consent.')
+      return
+    }
+    acting.current = true
+    setBusy(true)
+    try {
+      const next = await accountApi.identityVerify(token, {
+        fullName: kycName,
+        syntheticDocumentRef: kycDocRef,
+        consentConfirmed: kycConsent,
+      })
+      setAssurance(next)
+      setKycDocRef('')
+      setMessage('Synthetic identity assurance recorded cleanly. Raw document reference discarded.')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Identity verification failed.')
+    } finally {
+      acting.current = false
+      setBusy(false)
+    }
+  }
+
+  async function sendV5Invite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (acting.current) return
+    setError('')
+    setMessage('')
+    if (!inviteEmail.trim() || !consent) {
+      setError('Enter the guardian email and confirm limited notification consent.')
+      return
+    }
+    acting.current = true
+    setBusy(true)
+    try {
+      const created = await accountApi.createV5Invitation(token, {
+        guardianEmail: inviteEmail,
+        relationship: inviteRel,
+        roleSlot: inviteSlot,
+        notificationChannel: inviteChannel,
+      })
+      setLatestCreatedInvite(created)
+      setInviteEmail('')
+      await loadV5State()
+      setMessage('Durable guardian invitation created.')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Could not create guardian invitation.')
+    } finally {
+      acting.current = false
+      setBusy(false)
+    }
+  }
+
+  async function requestInviteOtp(invitationId: string, guardianEmail: string) {
+    if (acting.current) return
+    acting.current = true
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      const challenge = await accountApi.v5RequestOtp({
+        contact: guardianEmail,
+        purpose: 'guardian_invite',
+        channel: 'email',
+      })
+      setAcceptChallengeId((prev) => ({ ...prev, [invitationId]: challenge.challenge_id }))
+      if (challenge.dev_otp_preview) {
+        setAcceptOtpPreview((prev) => ({ ...prev, [invitationId]: challenge.dev_otp_preview! }))
+      }
+      setMessage('Guardian invitation verification OTP issued.')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to request invite OTP.')
+    } finally {
+      acting.current = false
+      setBusy(false)
+    }
+  }
+
+  async function acceptInvite(invitationId: string) {
+    if (acting.current) return
+    setError('')
+    setMessage('')
+    const inviteToken = acceptToken[invitationId]?.trim() || ''
+    const challengeId = acceptChallengeId[invitationId]?.trim() || ''
+    const otp = acceptOtpCode[invitationId]?.trim() || ''
+    const consented = Boolean(acceptConsent[invitationId])
+    if (!inviteToken || !challengeId || !otp || !consented) {
+      setError('Provide invite token, request & enter the OTP code, and confirm explicit guardian consent.')
+      return
+    }
+    acting.current = true
+    setBusy(true)
+    try {
+      await accountApi.acceptV5Invitation(token, invitationId, {
+        inviteToken,
+        otpChallengeId: challengeId,
+        otpCode: otp,
+        explicitConsent: consented,
+      })
+      await loadV5State()
+      setMessage('Guardian invitation verified and activated cleanly.')
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Could not accept guardian invitation.')
+    } finally {
+      acting.current = false
+      setBusy(false)
+    }
+  }
+
+  async function handleInvitationStatusAction(invitationId: string, action: 'decline' | 'revoke') {
+    if (acting.current) return
+    acting.current = true
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      if (action === 'decline') {
+        await accountApi.declineV5Invitation(token, invitationId)
+        setMessage('Invitation declined.')
+      } else {
+        await accountApi.revokeV5Invitation(token, invitationId)
+        setMessage('Guardian link revoked immediately.')
+      }
+      await loadV5State()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Could not update invitation.')
+    } finally {
+      acting.current = false
+      setBusy(false)
+    }
+  }
 
   async function change(body?: object, success?: string) {
     if (acting.current) return
@@ -55,6 +241,254 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
     void change({ action: 'invite', name, contact, relationship, consent }, 'Simulated invitation created.')
   }
 
+  // Real V5 UI
+  if (realV5) {
+    const visibleInvites = payer ? (invitations?.sent ?? []) : (invitations?.received ?? [])
+    const hasActiveGuardian = visibleInvites.some((i) => i.status === 'ACTIVE')
+
+    return (
+      <section className="card account-card enrollment-card">
+        <div className="card-header">
+          <div className="symbol mint"><Icon name="users" /></div>
+          <div>
+            <p className="eyebrow">{payer ? 'Identity & Trusted Guardians' : 'Identity & Guardian Consent'}</p>
+            <h2>{payer ? 'KYC & Guardian Enrollment' : 'KYC & Guardian Invitations'}</h2>
+          </div>
+        </div>
+        <p className="form-note">
+          Independent contact OTP and synthetic identity assurance ensure a payer and guardian are distinct verified individuals before activation.
+        </p>
+
+        {/* STEP 1: SYNTHETIC IDENTITY ASSURANCE */}
+        <article className="enrollment-item" style={{ marginBottom: '1.25rem' }}>
+          <div className="enrollment-title">
+            <h3>1. Identity Assurance (Synthetic Local IDP)</h3>
+            <span className={`pill ${assurance?.verified ? 'mint' : 'caution'}`}>
+              {assurance?.verified ? 'Verified' : 'Unverified'}
+            </span>
+          </div>
+          {assurance?.verified ? (
+            <div style={{ marginTop: '0.5rem' }}>
+              <p className="field-help">
+                Provider: <code>{assurance.provider}</code> · Level: <code>{assurance.assurance_level}</code>
+              </p>
+              <p className="field-help">
+                Opaque Person Ref: <code>{assurance.trusted_person_ref}</code> (Mock assurance: {String(assurance.is_mock_assurance)})
+              </p>
+            </div>
+          ) : (
+            <form className="account-form" onSubmit={(e) => void verifyIdentity(e)} noValidate style={{ marginTop: '0.75rem' }}>
+              <fieldset disabled={busy}>
+                <label>
+                  Full legal name
+                  <input
+                    required
+                    value={kycName}
+                    onChange={(e) => setKycName(e.target.value)}
+                    placeholder="e.g. Asha Nair"
+                  />
+                </label>
+                <label>
+                  Synthetic document reference (mock e-KYC — never real Aadhaar/PAN)
+                  <input
+                    required
+                    value={kycDocRef}
+                    onChange={(e) => setKycDocRef(e.target.value)}
+                    placeholder="e.g. SYNTH-ASHA-001"
+                  />
+                </label>
+                <p className="field-help">
+                  Normalized in-memory via HMAC-SHA256 into an opaque person reference and discarded immediately. Accounts sharing a reference cannot guard each other.
+                </p>
+                <label className="check-row">
+                  <input type="checkbox" checked={kycConsent} onChange={(e) => setKycConsent(e.target.checked)} />
+                  I consent to synthetic identity verification under PauseGuard V5 sandbox terms.
+                </label>
+              </fieldset>
+              <button className="primary" type="submit" disabled={busy}>
+                Verify identity
+              </button>
+            </form>
+          )}
+        </article>
+
+        {/* STEP 2: GUARDIAN INVITATIONS */}
+        <article className="enrollment-item">
+          <div className="enrollment-title">
+            <h3>2. {payer ? 'Trusted Guardian Invitations' : 'Received Guardian Invitations'}</h3>
+            <span className={`pill ${hasActiveGuardian ? 'mint' : 'neutral'}`}>
+              {hasActiveGuardian ? 'Active Link' : 'Pending'}
+            </span>
+          </div>
+
+          {latestCreatedInvite?.dev_invite_token_preview && payer && (
+            <div className="notice" role="status" style={{ marginTop: '0.75rem' }}>
+              <p><strong>Local Mock Invite Token Preview (for guardian acceptance):</strong></p>
+              <p><code>{latestCreatedInvite.dev_invite_token_preview}</code></p>
+            </div>
+          )}
+
+          {invitations === undefined && !error && <p role="status">Loading invitations…</p>}
+          {invitations && visibleInvites.length === 0 && (
+            <p className="field-help" style={{ marginTop: '0.5rem' }}>
+              {payer ? 'No guardian invitations sent yet.' : 'No guardian invitations received for your account email yet.'}
+            </p>
+          )}
+
+          <div className="enrollment-list" style={{ marginTop: '0.75rem' }}>
+            {visibleInvites.map((inv) => (
+              <div key={inv.invitation_id} className="enrollment-item" style={{ background: 'rgba(255,255,255,0.02)' }}>
+                <div className="enrollment-title">
+                  <h4>{payer ? inv.guardian_email : `Payer ${inv.payer_id.slice(0, 8)}…`} ({inv.role_slot})</h4>
+                  <span className={`pill ${inv.status === 'ACTIVE' ? 'mint' : inv.status === 'DECLINED' || inv.status === 'REVOKED' ? 'danger' : 'caution'}`}>
+                    {inv.status}
+                  </span>
+                </div>
+                <p className="field-help">
+                  Relationship: {inv.relationship} · Channel: {inv.notification_channel}
+                </p>
+
+                {!payer && inv.status === 'PENDING' && (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    {!assurance?.verified && (
+                      <p className="notice" role="status">Complete Step 1 (Identity Assurance) above before accepting.</p>
+                    )}
+                    <label>
+                      Invite Token
+                      <input
+                        value={acceptToken[inv.invitation_id] ?? ''}
+                        onChange={(e) => setAcceptToken((p) => ({ ...p, [inv.invitation_id]: e.target.value }))}
+                        placeholder="Paste pg_inv_... token"
+                      />
+                    </label>
+                    <div className="actions" style={{ marginTop: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => void requestInviteOtp(inv.invitation_id, inv.guardian_email)}
+                      >
+                        Request Invite OTP
+                      </button>
+                    </div>
+                    {acceptOtpPreview[inv.invitation_id] && (
+                      <p className="notice" role="status" style={{ marginTop: '0.5rem' }}>
+                        <strong>Local Mock Invite OTP Preview:</strong> <code>{acceptOtpPreview[inv.invitation_id]}</code>
+                      </p>
+                    )}
+                    <label style={{ marginTop: '0.5rem' }}>
+                      Invite OTP Code
+                      <input
+                        value={acceptOtpCode[inv.invitation_id] ?? ''}
+                        onChange={(e) => setAcceptOtpCode((p) => ({ ...p, [inv.invitation_id]: e.target.value }))}
+                        placeholder="Enter 6-digit OTP"
+                      />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(acceptConsent[inv.invitation_id])}
+                        onChange={(e) => setAcceptConsent((p) => ({ ...p, [inv.invitation_id]: e.target.checked }))}
+                      />
+                      I explicitly consent to serve as an independent guardian for privacy-redacted approvals.
+                    </label>
+                    <div className="actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={busy || !assurance?.verified}
+                        onClick={() => void acceptInvite(inv.invitation_id)}
+                      >
+                        Verify & Accept Invitation
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => void handleInvitationStatusAction(inv.invitation_id, 'decline')}
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {(inv.status === 'PENDING' || inv.status === 'ACTIVE') && (payer || inv.status === 'ACTIVE') && (
+                  <div className="actions" style={{ marginTop: '0.65rem' }}>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void handleInvitationStatusAction(inv.invitation_id, 'revoke')}
+                    >
+                      {inv.status === 'ACTIVE' ? 'Revoke Guardian Access' : 'Cancel Invitation'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {payer && (
+            <form className="account-form" onSubmit={(e) => void sendV5Invite(e)} noValidate style={{ marginTop: '1rem' }}>
+              <fieldset disabled={busy}>
+                <legend>Invite Primary or Backup Guardian</legend>
+                <label>
+                  Guardian account email
+                  <input
+                    required
+                    type="email"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    placeholder="guardian@example.com"
+                  />
+                </label>
+                <div className="account-fields">
+                  <label>
+                    Relationship
+                    <select value={inviteRel} onChange={(e) => setInviteRel(e.target.value as Relationship)}>
+                      {relationships.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Guardian slot
+                    <select value={inviteSlot} onChange={(e) => setInviteSlot(e.target.value as 'primary' | 'backup')}>
+                      <option value="primary">Primary guardian</option>
+                      <option value="backup">Backup guardian</option>
+                    </select>
+                  </label>
+                  <label>
+                    Alert channel
+                    <select value={inviteChannel} onChange={(e) => setInviteChannel(e.target.value as 'in_app' | 'email' | 'push' | 'sms')}>
+                      <option value="in_app">In-app</option>
+                      <option value="email">Email</option>
+                      <option value="push">Push (stub)</option>
+                      <option value="sms">SMS (stub)</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="check-row">
+                  <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+                  I consent to sending redacted review requests (no amounts/recipients) after guardian acceptance.
+                </label>
+              </fieldset>
+              <button className="primary" type="submit" disabled={busy}>Send durable invitation</button>
+            </form>
+          )}
+        </article>
+
+        {error && <p role="alert" className="notice" style={{ marginTop: '1rem' }}>{error}</p>}
+        {message && <p role="status" className="form-note" style={{ marginTop: '0.75rem' }}>{message}</p>}
+        <div className="actions" style={{ marginTop: '0.75rem' }}>
+          <button type="button" className="secondary" disabled={busy} onClick={() => void loadV5State()}>
+            {busy ? 'Refreshing…' : 'Refresh status'}
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  // Legacy standalone Vite mock & Sample Demo Pair path (unchanged for compatibility)
   const current = items?.[0]
   const occupied = current?.status === 'Pending' || current?.status === 'Accepted'
 
@@ -71,7 +505,6 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
         Guardians can see an assigned request reference, risk tier, deadline and status. Amounts, recipients, payment purposes and payer transaction history stay private.
       </p>
 
-      {/* Visual Timeline of Guardian Circuit Breaker */}
       <div className="enrollment-stepper-visual" aria-hidden="true">
         <div className="enrollment-step active">
           <span className="step-circle"><Icon name="shieldCheck" size={14} /></span>
@@ -172,7 +605,7 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
       </div>
 
       {payer && profile.sample && (
-        <p className="form-note">The walkthrough uses a pre-enrolled sample pair. Create your own demo payer to try enrollment changes.</p>
+        <p className="form-note">The walkthrough uses a pre-enrolled sample pair. Create your own payer account to test durable invitations and KYC.</p>
       )}
 
       {payer && !profile.sample && items && !occupied && (
