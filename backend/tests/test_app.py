@@ -40,6 +40,7 @@ def test_applications_do_not_share_dependency_overrides(create_app):
 
 CANONICAL_V2_ROUTES = {
     "/api/v2/health",
+    "/api/v2/metrics",
     "/api/v2/profile",
     "/api/v2/demo/session",
     "/api/v2/auth/signup",
