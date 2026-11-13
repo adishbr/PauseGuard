@@ -12,8 +12,10 @@ SECURITY CONTROLS:
 """
 
 from collections.abc import Mapping
+import threading
+import time
 from types import MappingProxyType
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.config import Settings, load_settings
 from app.models.roles import UserRole
@@ -135,15 +137,269 @@ def resolve_synthetic_token(
     token: str,
     *,
     settings: Settings | None = None,
+    now_ms: int | None = None,
 ) -> TrustedActorContext | None:
-    """Resolve a bearer token string to a TrustedActorContext if present in demo registry.
+    """Resolve a bearer token string to a TrustedActorContext.
 
-    Fails closed if demo mode is not permitted in the active settings environment.
-    Client-supplied roles and metadata are never inspected here; only the
-    server-persisted synthetic context mapping is returned.
+    Resolution Order:
+    1. Fail closed if demo mode is not permitted in the active settings environment.
+    2. Check dynamic DemoSessionStore: enforces strict 30m session expiration.
+       Expired sessions return None (resulting in HTTP 401).
+    3. Check static DEMO_TOKEN_REGISTRY: preserves approved synthetic test behavior
+       for offline unit tests using static fixture tokens.
     """
     if not isinstance(token, str):
         return None
     if not is_demo_mode_allowed(settings):
         return None
-    return DEMO_TOKEN_REGISTRY.get(token.strip())
+
+    cleaned = token.strip()
+    if not cleaned:
+        return None
+
+    # 1. Dynamic demo session store with strict fail-closed expiration check
+    session = DEMO_SESSION_STORE.get_session(cleaned, now_ms=now_ms)
+    if session is not None:
+        return session.actor
+
+    # 2. Static approved demo tokens for offline test suites
+    return DEMO_TOKEN_REGISTRY.get(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Demo Identity Registry & Resolution
+# ---------------------------------------------------------------------------
+
+class SyntheticDemoIdentity:
+    """Immutable metadata describing a known authorized synthetic demo identity."""
+
+    __slots__ = ("actor", "token", "name", "contact", "aliases", "threshold_paise", "is_admin")
+
+    def __init__(
+        self,
+        actor: TrustedActorContext,
+        token: str,
+        name: str,
+        contact: str,
+        aliases: tuple[str, ...],
+        threshold_paise: int | None = None,
+        is_admin: bool = False,
+    ) -> None:
+        self.actor = actor
+        self.token = token
+        self.name = name
+        self.contact = contact
+        self.aliases = aliases
+        self.threshold_paise = threshold_paise
+        self.is_admin = is_admin
+
+
+SYNTHETIC_DEMO_IDENTITIES: tuple[SyntheticDemoIdentity, ...] = (
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_PAYER,
+        token=SYNTHETIC_PAYER_TOKEN,
+        name="Asha Demo",
+        contact="asha@pauseguard.test",
+        aliases=("asha@pauseguard.test", "+919876543210", "9876543210", "demo-payer", "primary"),
+        threshold_paise=5500000,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_GUARDIAN,
+        token=SYNTHETIC_GUARDIAN_TOKEN,
+        name="Ravi Demo",
+        contact="ravi@pauseguard.test",
+        aliases=("ravi@pauseguard.test", "+919876543211", "9876543211", "demo-guardian", "primary"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_OTHER_PAYER,
+        token=SYNTHETIC_OTHER_PAYER_TOKEN,
+        name="Admin Sandbox Payer",
+        contact="sandbox-payer@pauseguard.test",
+        aliases=("sandbox-payer@pauseguard.test", "other", "secondary", "other_payer", "admin-synthetic-payer"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_ANALYST,
+        token=SYNTHETIC_ANALYST_TOKEN,
+        name="Analyst Demo",
+        contact="analyst@pauseguard.test",
+        aliases=("analyst@pauseguard.test", "primary"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_ADMIN,
+        token=SYNTHETIC_ADMIN_TOKEN,
+        name="Admin Demo",
+        contact="admin@pauseguard.test",
+        aliases=("admin@pauseguard.test", "demo-admin", "primary"),
+        threshold_paise=None,
+        is_admin=True,
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Local Demo Session Store & Expiration Management
+# ---------------------------------------------------------------------------
+
+class DemoSessionRecord:
+    """Server-side record of an active or expired local prototype demo session."""
+
+    __slots__ = (
+        "session_id",
+        "token",
+        "user_id",
+        "role",
+        "actor",
+        "identity",
+        "created_at_ms",
+        "expires_at_ms",
+    )
+
+    def __init__(
+        self,
+        session_id: str,
+        token: str,
+        user_id: UUID,
+        role: UserRole,
+        actor: TrustedActorContext,
+        identity: SyntheticDemoIdentity,
+        created_at_ms: int,
+        expires_at_ms: int,
+    ) -> None:
+        self.session_id = session_id
+        self.token = token
+        self.user_id = user_id
+        self.role = role
+        self.actor = actor
+        self.identity = identity
+        self.created_at_ms = created_at_ms
+        self.expires_at_ms = expires_at_ms
+
+    def is_expired(self, now_ms: int | None = None) -> bool:
+        current = int(time.time() * 1000) if now_ms is None else now_ms
+        return current >= self.expires_at_ms
+
+
+class DemoSessionStore:
+    """Thread-safe, fail-closed in-memory session registry for local prototype demo sessions.
+
+    SECURITY INVARIANTS:
+    1. Ephemeral: In-memory only; cleared on process restart.
+    2. Fail-closed expiration: Sessions expire strictly after lifespan (default 1800s / 30m).
+    3. Revocable: Explicit deletion on logout / session termination.
+    4. Deterministic identity: Bound strictly to server-managed SyntheticDemoIdentity.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sessions: dict[str, DemoSessionRecord] = {}
+
+    def create_session(
+        self,
+        identity: SyntheticDemoIdentity,
+        role: UserRole,
+        expires_in_seconds: int = 1800,
+        now_ms: int | None = None,
+    ) -> DemoSessionRecord:
+        current_time = int(time.time() * 1000) if now_ms is None else now_ms
+        expires_at = current_time + (expires_in_seconds * 1000)
+        session_id = f"pg_demo_{uuid4().hex[:16]}"
+        role_tag = role.value.lower()
+        token = f"demo-session-{role_tag}-{uuid4().hex[:12]}"
+
+        record = DemoSessionRecord(
+            session_id=session_id,
+            token=token,
+            user_id=identity.actor.user_id,
+            role=role,
+            actor=identity.actor,
+            identity=identity,
+            created_at_ms=current_time,
+            expires_at_ms=expires_at,
+        )
+        with self._lock:
+            self._sessions[token] = record
+        return record
+
+    def get_session(self, token: str, now_ms: int | None = None) -> DemoSessionRecord | None:
+        if not isinstance(token, str):
+            return None
+        cleaned = token.strip()
+        with self._lock:
+            record = self._sessions.get(cleaned)
+            if record is None:
+                return None
+            if record.is_expired(now_ms):
+                # Fail closed: Purge expired session from registry
+                self._sessions.pop(cleaned, None)
+                return None
+            return record
+
+    def revoke_session(self, token: str) -> bool:
+        if not isinstance(token, str):
+            return False
+        with self._lock:
+            return self._sessions.pop(token.strip(), None) is not None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._sessions.clear()
+
+
+DEMO_SESSION_STORE = DemoSessionStore()
+
+
+def _normalize_contact(contact: str) -> str:
+    cleaned = contact.strip().lower()
+    cleaned = cleaned.replace(" ", "").replace("-", "")
+    if cleaned.startswith("+91") and len(cleaned) == 13:
+        return cleaned[3:]
+    return cleaned
+
+
+def get_authorized_synthetic_identity(
+    role: UserRole,
+    contact: str | None = None,
+    identity_tag: str | None = None,
+) -> SyntheticDemoIdentity | None:
+    """Resolve an authorized synthetic demo identity by role and optional contact/tag.
+
+    SECURITY INVARIANTS:
+    - Never provisions dynamic accounts or accepts arbitrary contacts.
+    - If contact is provided, it must strictly match an authorized synthetic identity.
+    - If no contact is provided, defaults to the primary synthetic identity for that role.
+    """
+    if contact is not None and contact.strip():
+        norm_contact = _normalize_contact(contact)
+        for identity in SYNTHETIC_DEMO_IDENTITIES:
+            if role in identity.actor.roles:
+                for alias in identity.aliases:
+                    if _normalize_contact(alias) == norm_contact:
+                        return identity
+        return None
+
+    if identity_tag is not None and identity_tag.strip():
+        tag = identity_tag.strip().lower()
+        for identity in SYNTHETIC_DEMO_IDENTITIES:
+            if role in identity.actor.roles:
+                for alias in identity.aliases:
+                    if alias.lower() == tag:
+                        return identity
+        return None
+
+    # Default to the primary synthetic identity for this role
+    for identity in SYNTHETIC_DEMO_IDENTITIES:
+        if role in identity.actor.roles and "primary" in identity.aliases:
+            return identity
+
+    return None
+
+
+def get_synthetic_identity_by_actor(actor: TrustedActorContext) -> SyntheticDemoIdentity | None:
+    """Find the synthetic demo identity matching the given actor user ID."""
+    for identity in SYNTHETIC_DEMO_IDENTITIES:
+        if identity.actor.user_id == actor.user_id:
+            return identity
+    return None

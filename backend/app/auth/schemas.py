@@ -491,3 +491,70 @@ class RazorpayWebhookResponse(BaseModel):
     event_type: str
     message: str
     can_authorize_p2p_payment: bool = Field(False, description="Invariant: merchant webhooks cannot authorize P2P payments")
+
+
+# ---------------------------------------------------------------------------
+# Local Demo Authentication Bridge Schemas
+# ---------------------------------------------------------------------------
+
+class DemoSessionRequest(BaseModel):
+    """Validated request to establish a local synthetic demo session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: UserRole = Field(..., description="Requested demo role (payer, guardian, analyst, admin)")
+    contact: str | None = Field(None, max_length=128, description="Optional synthetic demo contact matching authorized identities")
+    sample: bool | None = Field(None, description="Optional flag for standard sample demo identity")
+    identity_tag: str | None = Field(None, max_length=64, description="Optional synthetic identity identifier (primary, other)")
+    expires_in_seconds: int | None = Field(
+        None,
+        ge=1,
+        le=86400,
+        description="Optional session lifespan in seconds (defaults to 1800 for 30m expiration)",
+    )
+
+
+class DemoSessionProfile(BaseModel):
+    """Synthetic demo profile metadata compatible with frontend expectations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    id: str = Field(..., description="Demo profile ID")
+    role: str = Field(..., description="Demo role name")
+    name: str = Field(..., description="Synthetic display name")
+    contact: str = Field(..., description="Synthetic contact identifier")
+    sample: bool = Field(True, description="Always True for synthetic demo identities")
+    category: str = Field("personal", description="Account category")
+    language: str = Field("en", description="Default UI language")
+    large_text: bool = Field(False, serialization_alias="largeText", description="Accessibility preference")
+    organization: str = Field("", description="Optional organization name")
+    recurring_supplier: str = Field("", serialization_alias="recurringSupplier", description="Supplier alias")
+    threshold_paise: int | None = Field(None, serialization_alias="thresholdPaise", description="Alert threshold in paise")
+    notifications: bool = Field(True, description="Notification preference")
+    quiet_start: str = Field("", serialization_alias="quietStart", description="Quiet hours start")
+    quiet_end: str = Field("", serialization_alias="quietEnd", description="Quiet hours end")
+    call_consent: bool = Field(False, serialization_alias="callConsent", description="Simulated call consent")
+    safe_lock: bool = Field(False, serialization_alias="safeLock", description="Safe-Lock status")
+
+
+class DemoSessionResponse(BaseModel):
+    """Structured response confirming local demo session token issuance."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    token: str = Field(..., description="Issued synthetic bearer token for Authorization header")
+    token_type: str = Field("Bearer", description="Token scheme")
+    expires_in_seconds: int = Field(1800, description="Session lifespan in seconds (30m)")
+    expires_at: int = Field(..., serialization_alias="expiresAt", description="Epoch millisecond expiration timestamp")
+    user_id: UUID = Field(..., description="Server-assigned synthetic user UUID")
+    role: UserRole = Field(..., description="Primary server-resolved role")
+    roles: list[UserRole] = Field(..., description="Active server-persisted roles")
+    profile: DemoSessionProfile = Field(..., description="Synthetic demo profile metadata")
+
+
+class DemoSessionLogoutResponse(BaseModel):
+    """Confirmation that a local prototype demo session was terminated."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signed_out: bool = Field(True, description="Confirmation that the demo session was revoked")
