@@ -8,6 +8,8 @@ import { demoAccountPath } from '../src/types/account.ts'
 import { formatRupees, toPaise } from '../src/services/demoSession.ts'
 import { isLocale, translator } from '../src/locales/messages.ts'
 import { parsePayment } from '../src/services/paymentResponse.ts'
+import { isLoopbackHost, isRealBackendMode } from '../src/services/backendMode.ts'
+import { accountApi, AccountError } from '../src/services/accountApi.ts'
 
 const demoTokens = { payer: 'payer', guardian: 'guardian' }
 const coerced = { beneficiary_id: 'supplier_new', amount_paise: 5_500_000, purpose: 'kyc_verification', idempotency_key: 'attempt-1' }
@@ -565,5 +567,68 @@ test('Razorpay Test Mode merchant sandbox isolation and admin verification', asy
   const statusRes = await call(`/sandbox/razorpay/orders/${orderRes.body.razorpay_order_id}`, adminToken)
   assert.equal(statusRes.code, 200)
   assert.equal(statusRes.body.id, orderRes.body.razorpay_order_id)
+})
+
+test('parsePayment accepts FastAPI FullPaymentView without risk_score/reason_codes and rejects invalid types', () => {
+  const fastApiPayload = {
+    id: 'pg_fast_1',
+    status: 'AWAITING_GUARDIAN',
+    amount_paise: 550000,
+    tier: 3,
+    beneficiary_id: 'supplier_new',
+    purpose: 'kyc_verification',
+    guardian_deadline: '2026-11-13T10:00:30Z',
+    version: 1,
+  }
+  const parsed = parsePayment(fastApiPayload, 'payer')
+  assert.ok(parsed)
+  assert.equal(parsed.id, 'pg_fast_1')
+  assert.equal(parsed.risk_score, 0)
+  assert.deepEqual(parsed.reason_codes, [])
+
+  assert.equal(parsePayment({ ...fastApiPayload, risk_score: 'high' }, 'payer'), undefined)
+  assert.equal(parsePayment({ ...fastApiPayload, reason_codes: 'not-an-array' }, 'payer'), undefined)
+})
+
+test('backendMode helpers identify loopback hosts and default safely to mock mode', (t) => {
+  const originalWindow = globalThis.window
+  t.after(() => {
+    globalThis.window = originalWindow
+  })
+
+  assert.equal(isRealBackendMode(), false)
+  for (const hostname of ['127.0.0.1', 'localhost', '::1', '[::1]']) {
+    globalThis.window = { location: { hostname } }
+    assert.equal(isLoopbackHost(), true)
+  }
+  globalThis.window = { location: { hostname: 'pauseguard.pages.dev' } }
+  assert.equal(isLoopbackHost(), false)
+})
+
+test('accountApi reports clear diagnostic when static host returns HTML 404 for /__pauseguard/demo', async (t) => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  })
+
+  globalThis.window = {
+    location: { hostname: 'pauseguard.pages.dev' },
+    dispatchEvent: () => true,
+  }
+  globalThis.fetch = async () =>
+    new Response('<!doctype html><html><body>Not Found</body></html>', {
+      status: 404,
+      headers: { 'Content-Type': 'text/html' },
+    })
+
+  await assert.rejects(
+    () => accountApi.login('payer', '', true),
+    (error) =>
+      error instanceof AccountError &&
+      error.status === 404 &&
+      error.message.includes('The local demo server (/__pauseguard/demo) is not available on this host'),
+  )
 })
 

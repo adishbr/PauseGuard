@@ -5,7 +5,8 @@ import type { MessageKey } from '../locales/en.ts'
 import { languages, translator } from '../locales/messages.ts'
 import type { Locale, Translate } from '../locales/messages.ts'
 import { formatRupees } from '../services/demoSession.ts'
-import { guardianDecision, payerAction, paymentError } from '../services/paymentApi.ts'
+import { isRealBackendMode } from '../services/backendMode.ts'
+import { activateFallback, guardianDecision, payerAction, paymentError } from '../services/paymentApi.ts'
 import { terminalStatuses } from '../types/payment.ts'
 import type { Role, Status } from '../types/payment.ts'
 import { Icon } from './Icon.tsx'
@@ -106,9 +107,13 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
   useEffect(() => {
     if (remaining === 0 && deadline && !checking && !error && !busy && checkedDeadline.current !== deadline) {
       checkedDeadline.current = deadline
-      refresh()
+      if (role === 'payer' && isRealBackendMode()) {
+        void activateFallback(token, id).then(accept).catch(() => refresh())
+      } else {
+        refresh()
+      }
     }
-  }, [remaining, deadline, checking, error, busy, refresh])
+  }, [remaining, deadline, checking, error, busy, role, token, id, accept, refresh])
 
   async function act(action: Action) {
     if (inFlight.current || checking || error || !status) return

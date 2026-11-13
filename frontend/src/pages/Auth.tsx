@@ -6,6 +6,7 @@ import type { Locale } from '../locales/messages.ts'
 import { reviewDurations } from '../../mocks/reviewPreference.ts'
 import type { ReviewDuration } from '../../mocks/reviewPreference.ts'
 import { accountApi } from '../services/accountApi.ts'
+import { isLoopbackHost, isRealBackendMode } from '../services/backendMode.ts'
 import { storageWrite, toPaise } from '../services/demoSession.ts'
 import { accountCategories, demoContact, demoName, isEmailContact, isMobileContact } from '../types/account.ts'
 import type { AccountCategory, DemoSession } from '../types/account.ts'
@@ -42,6 +43,10 @@ export function Auth({ path, role, locale, onSession, expired }: {
   const isEmail = isEmailContact(contact)
   const isMobile = isMobileContact(contact)
 
+  const realBackend = isRealBackendMode()
+  const showSampleAccess = !signup && !enrollmentReturn && (!realBackend || isLoopbackHost())
+  const unsupportedRealSignup = realBackend && signup
+
   async function submit(event?: FormEvent, sample = false) {
     event?.preventDefault()
     if (sending.current) return
@@ -54,7 +59,14 @@ export function Auth({ path, role, locale, onSession, expired }: {
         nameInput.current?.focus()
         return
       }
-      if (!demoContact(contact)) {
+      if (realBackend && !signup) {
+        if (!contact.trim()) {
+          setInvalid('contact')
+          setError('Enter a synthetic demo contact or backend-issued bearer token.')
+          contactInput.current?.focus()
+          return
+        }
+      } else if (!demoContact(contact)) {
         setInvalid('contact')
         setError('Enter a valid email address or 10-digit Indian mobile number.')
         contactInput.current?.focus()
@@ -103,7 +115,17 @@ export function Auth({ path, role, locale, onSession, expired }: {
         {expired && <p role="alert" className="notice">Your demo session expired. Sign in again to continue.</p>}
         {error && <p id="auth-error" role="alert" className="notice">{error}</p>}
 
-        {form ? (
+        {unsupportedRealSignup ? (
+          <div className="notice" role="status">
+            <p>
+              Self-service account registration is only available in local mock mode.
+              In FastAPI integration mode, sign in using a provisioned synthetic demo identity or bearer token.
+            </p>
+            <div className="actions" style={{ marginTop: '0.85rem' }}>
+              <a className="primary" href={authLink('login')}>Go to Sign in</a>
+            </div>
+          </div>
+        ) : form ? (
           <form className="account-form" noValidate onSubmit={(event) => void submit(event)}>
             {signup && (
               <div className="onboarding-stepper">
@@ -136,24 +158,27 @@ export function Auth({ path, role, locale, onSession, expired }: {
               )}
 
               <label>
-                Email or mobile
+                {realBackend && !signup ? 'Synthetic contact or bearer token' : 'Email or mobile'}
                 <input
                   ref={contactInput}
                   value={contact}
-                  maxLength={90}
+                  maxLength={512}
                   required
                   autoComplete="off"
                   spellCheck={false}
                   aria-invalid={invalid === 'contact' || undefined}
                   aria-describedby={invalid === 'contact' ? 'contact-help auth-error' : 'contact-help'}
                   onChange={(event) => setContact(event.target.value)}
-                  placeholder="asha@example.test"
+                  placeholder={realBackend && !signup ? 'asha@example.test or bearer token' : 'asha@example.test'}
                 />
               </label>
 
               <p className="field-help" id="contact-help">
-                {contact && (isEmail || isMobile) ? 'Format looks right. Contact details are not verified in this preview.' :
-                  'Use a fictional email such as asha@example.test.'}
+                {realBackend && !signup
+                  ? 'Authenticates against FastAPI (/api/v2/demo/session or /api/v2/profile).'
+                  : contact && (isEmail || isMobile)
+                    ? 'Format looks right. Contact details are not verified in this preview.'
+                    : 'Use a fictional email such as asha@example.test.'}
               </p>
             </fieldset>
 
@@ -258,7 +283,7 @@ export function Auth({ path, role, locale, onSession, expired }: {
           </div>
         )}
 
-        {form && (
+        {form && !unsupportedRealSignup && !realBackend && (
           <div className="auth-mode-switch">
             <a className="text-button" href={authLink(signup ? 'login' : 'signup')}>
               {signup ? 'Already registered? Sign in' : 'Create an account'}
@@ -266,7 +291,7 @@ export function Auth({ path, role, locale, onSession, expired }: {
           </div>
         )}
 
-        {!signup && !enrollmentReturn && (
+        {showSampleAccess && (
           <div className="sample-access">
             <button className="text-button" type="button" disabled={busy} onClick={() => void submit(undefined, true)}>
               {guardian ? 'Open sample guardian' : 'Open sample payer'} <Icon name="arrow" size={16} />
