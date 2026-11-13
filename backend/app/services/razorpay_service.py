@@ -450,6 +450,10 @@ class RazorpayMerchantService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Webhook event payload missing unique event ID",
             )
+        event_id = event_id.strip()
+        payment_entity = self._extract_webhook_payment_entity(event_data)
+        payment_id = payment_entity.get("id") if isinstance(payment_entity.get("id"), str) else None
+        rzp_order_id = payment_entity.get("order_id") if isinstance(payment_entity.get("order_id"), str) else None
 
         # Check durable configuration availability if session is missing
         if self.session is None:
@@ -493,7 +497,7 @@ class RazorpayMerchantService:
             webhook_entity = RazorpayWebhookEvent(
                 id=event_id,
                 event_type=event_type or "unknown",
-                entity_id=event_data.get("payload", {}).get("payment", {}).get("entity", {}).get("id"),
+                entity_id=payment_id,
                 payload_json=event_data,
                 status="processed",
             )
@@ -512,9 +516,6 @@ class RazorpayMerchantService:
 
             # Reconcile if payment captured
             if event_type == "payment.captured":
-                payment_entity = event_data.get("payload", {}).get("payment", {}).get("entity", {})
-                rzp_order_id = payment_entity.get("order_id")
-                payment_id = payment_entity.get("id")
                 if rzp_order_id:
                     order_obj = (
                         self.session.query(RazorpayOrder)
@@ -545,8 +546,6 @@ class RazorpayMerchantService:
                             pay_record.status = "captured"
                             pay_record.verified_at = now
             elif event_type == "payment.failed":
-                payment_entity = event_data.get("payload", {}).get("payment", {}).get("entity", {})
-                rzp_order_id = payment_entity.get("order_id")
                 if rzp_order_id:
                     order_obj = (
                         self.session.query(RazorpayOrder)
@@ -569,13 +568,9 @@ class RazorpayMerchantService:
                     )
 
                 if event_type == "payment.captured":
-                    payment_entity = event_data.get("payload", {}).get("payment", {}).get("entity", {})
-                    rzp_order_id = payment_entity.get("order_id")
                     if rzp_order_id in self._mock_orders:
                         self._mock_orders[rzp_order_id]["status"] = "paid"
                 elif event_type == "payment.failed":
-                    payment_entity = event_data.get("payload", {}).get("payment", {}).get("entity", {})
-                    rzp_order_id = payment_entity.get("order_id")
                     if rzp_order_id in self._mock_orders:
                         # Out-of-order protection: NEVER revert an already-paid order to failed
                         if self._mock_orders[rzp_order_id]["status"] != "paid":
@@ -588,6 +583,26 @@ class RazorpayMerchantService:
             message="Webhook event verified and processed successfully",
             can_authorize_p2p_payment=False,
         )
+
+    @staticmethod
+    def _extract_webhook_payment_entity(event_data: dict[str, Any]) -> dict[str, Any]:
+        """Validate nested webhook payload/payment/entity objects and return the payment entity."""
+        current: dict[str, Any] = event_data
+        for key, detail in (
+            ("payload", "Webhook payload field must be an object"),
+            ("payment", "Webhook payment field must be an object"),
+            ("entity", "Webhook payment entity must be an object"),
+        ):
+            if key not in current:
+                return {}
+            nxt = current[key]
+            if not isinstance(nxt, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=detail,
+                )
+            current = nxt
+        return current
 
     def get_order(
         self,
