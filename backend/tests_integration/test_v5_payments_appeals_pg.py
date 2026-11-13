@@ -119,6 +119,18 @@ def test_pg_v5_gate4_snapshot_invalidation_appeals_and_retry(pg_session_factory)
             json={"approved": True, "resolution_note": "self"},
         ).status_code == 403
 
+        # Seed demo analyst in PostgreSQL users table so fk_payment_appeals_resolver succeeds
+        from app.auth.identities import SYNTHETIC_ANALYST_ID
+        from app.models.roles import UserRole
+        from app.models.user import RoleBinding, SyntheticUser
+
+        with pg_session_factory() as s:
+            if s.get(SyntheticUser, SYNTHETIC_ANALYST_ID) is None:
+                s.add(SyntheticUser(id=SYNTHETIC_ANALYST_ID))
+                s.flush()
+                s.add(RoleBinding(user_id=SYNTHETIC_ANALYST_ID, role=UserRole.ANALYST))
+                s.commit()
+
         resolved = client.post(
             f"/api/v2/payments/{pid}/appeals/{appeal['appeal_id']}/resolve",
             headers={"Authorization": "Bearer demo-token-analyst"},

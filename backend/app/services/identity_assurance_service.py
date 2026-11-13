@@ -25,7 +25,6 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth.identities import SYNTHETIC_GUARDIAN_ID, SYNTHETIC_PAYER_ID
 from app.config import Settings, load_settings
 from app.services.v5_store import MockIdentityAssuranceRecord, V5MockIdentityStore
 
@@ -327,6 +326,8 @@ class IdentityAssuranceService:
                     )
 
         # Preserve seeded V4.1 demo identities as having distinct synthetic trusted_person_refs
+        from app.auth.identities import SYNTHETIC_GUARDIAN_ID, SYNTHETIC_PAYER_ID
+
         if user_id in (SYNTHETIC_PAYER_ID, SYNTHETIC_GUARDIAN_ID) and self._settings.mode == "mock":
             label = "SEEDED_PAYER" if user_id == SYNTHETIC_PAYER_ID else "SEEDED_GUARDIAN"
             tpr = f"tpr_seeded_{label.lower()}_{str(user_id).replace('-', '')[:16]}"

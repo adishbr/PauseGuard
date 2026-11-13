@@ -7,7 +7,7 @@
 
 | Suite | Command | Result |
 | :--- | :--- | :--- |
-| Backend + Intelligence Pytest | `pytest tests backend/tests -q` | **1072 passed**, 52 subtests passed, 0 failed (`14.70s`) |
+| Backend + Intelligence Pytest | `pytest tests backend/tests -q` | **1075 passed**, 52 subtests passed, 0 failed (`15.60s`) |
 | Frontend Build + TypeScript | `npm run build` (`tsc -b && vite build`) | Passed (`485ms`, 0 errors) |
 | Frontend Lint | `npm run lint` (`oxlint src tests mocks`) | **0 warnings, 0 errors** (`216ms`) |
 | Frontend Unit & Contract Tests | `npm test` (`node --test tests/payment.test.mjs`) | **23 passed**, 0 failed (`701ms`) |
