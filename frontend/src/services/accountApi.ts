@@ -218,6 +218,25 @@ async function fetchBackendSession(token: string): Promise<DemoSession> {
   }
 }
 
+export function provisionedIdentityError(role: AppRole, contact: string): AccountError {
+  const fallbackContact =
+    role === 'admin'
+      ? 'admin@pauseguard.test'
+      : role === 'guardian'
+        ? 'ravi@pauseguard.test'
+        : 'asha@pauseguard.test'
+  const sampleAction =
+    role === 'admin'
+      ? 'Open sample admin'
+      : role === 'guardian'
+        ? 'Open sample guardian'
+        : 'Open sample payer'
+  return new AccountError(
+    404,
+    `No provisioned ${role} identity matches "${contact}". Server-enforced auth allows ${fallbackContact} or "${sampleAction}" in FastAPI preview mode.`,
+  )
+}
+
 export const accountApi = {
   login: async (role: AppRole, contact: string, sample = false): Promise<DemoSession> => {
     if (!isRealBackendMode()) {
@@ -225,7 +244,12 @@ export const accountApi = {
     }
 
     const trimmed = contact.trim()
-    if (sample || !trimmed.startsWith('demo')) {
+    const looksLikeBearerToken =
+      trimmed.startsWith('demo-token-') ||
+      trimmed.startsWith('demo_token_') ||
+      trimmed.startsWith('pg_demo_') ||
+      trimmed.startsWith('eyJ')
+    if (sample || !looksLikeBearerToken) {
       if (!isLoopbackHost()) {
         throw new AccountError(
           403,
@@ -241,6 +265,15 @@ export const accountApi = {
         }
         return session
       } catch (error) {
+        if (
+          error instanceof AccountError &&
+          error.status === 404 &&
+          error.message.includes('No authorized synthetic demo identity') &&
+          !sample &&
+          trimmed
+        ) {
+          throw provisionedIdentityError(role, trimmed)
+        }
         if (!(error instanceof AccountError && error.status === 404) || sample || !trimmed) {
           throw error
         }

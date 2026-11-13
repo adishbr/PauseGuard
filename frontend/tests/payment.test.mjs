@@ -9,7 +9,7 @@ import { formatRupees, toPaise } from '../src/services/demoSession.ts'
 import { isLocale, translator } from '../src/locales/messages.ts'
 import { parsePayment } from '../src/services/paymentResponse.ts'
 import { isLoopbackHost, isRealBackendMode } from '../src/services/backendMode.ts'
-import { accountApi, AccountError } from '../src/services/accountApi.ts'
+import { accountApi, AccountError, provisionedIdentityError } from '../src/services/accountApi.ts'
 import { AdminApiError, razorpayApi, validateRazorpayTestKey } from '../src/services/adminApi.ts'
 
 const demoTokens = { payer: 'payer', guardian: 'guardian' }
@@ -682,4 +682,22 @@ test('accountApi reports clear diagnostic when static host returns HTML 404 for 
       error.message.includes('The local demo server (/__pauseguard/demo) is not available on this host'),
   )
 })
+
+test('provisionedIdentityError explains server-enforced synthetic contacts per role', () => {
+  const payerErr = provisionedIdentityError('payer', 'test@gmail.com')
+  assert.equal(payerErr.status, 404)
+  assert.match(payerErr.message, /asha@pauseguard\.test/)
+  assert.match(payerErr.message, /Open sample payer/)
+
+  const guardianErr = provisionedIdentityError('guardian', 'bhgjbd')
+  assert.equal(guardianErr.status, 404)
+  assert.match(guardianErr.message, /ravi@pauseguard\.test/)
+  assert.match(guardianErr.message, /Open sample guardian/)
+
+  const adminErr = provisionedIdentityError('admin', 'admin@gmail.com')
+  assert.equal(adminErr.status, 404)
+  assert.match(adminErr.message, /admin@pauseguard\.test/)
+  assert.match(adminErr.message, /Open sample admin/)
+})
+
 
