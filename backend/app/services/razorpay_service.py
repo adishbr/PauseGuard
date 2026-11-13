@@ -1,4 +1,4 @@
-﻿"""Authoritative backend service for Razorpay Test Mode merchant sandbox operations.
+"""Authoritative backend service for Razorpay Test Mode merchant sandbox operations.
 
 SECURITY INVARIANTS:
 1. Test Mode isolation: Operates strictly with Test Mode credentials (rzp_test_*).
