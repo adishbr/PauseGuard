@@ -105,6 +105,8 @@ try:
         '/api/v2/sandbox/razorpay/orders/{order_id}',
         '/api/v2/ws/ticket',
         '/api/v2/notifications/outbox',
+        '/api/v2/bank/intents',
+        '/api/v2/bank/webhooks/settlement',
     }
     assert set(app.openapi()['paths']) == expected_routes
     print('guarded cold import passed')

@@ -47,9 +47,9 @@ test('E2E Real Backend: Separate payer/guardian sessions, WS notification, redac
   payer.on('websocket', (ws) => payerWsUrls.push(ws.url()))
   guardian.on('websocket', (ws) => guardianWsUrls.push(ws.url()))
 
-  // 1. Payer signup displays real-backend notice
+  // 1. Payer signup offers real V5 Email+Password+OTP registration
   await payer.goto(`${origin}/payer/signup`)
-  await payer.getByText(/Self-service account registration is only available in local mock mode/i).waitFor()
+  await payer.getByRole('button', { name: 'Create account & send OTP' }).waitFor()
 
   // 2. Payer sample login
   await payer.goto(`${origin}/payer/login`)
@@ -71,8 +71,14 @@ test('E2E Real Backend: Separate payer/guardian sessions, WS notification, redac
   assert.ok(paymentIdMatch, `Expected pg_ payment reference in URL or UI, got ${payer.url()}`)
   paymentId = paymentIdMatch[0]
 
-  // Payer establishes /api/v2/ws connection on active payment screen
-  assert.ok(payerWsUrls.some((u) => u.includes('/api/v2/ws?token=')), 'Expected payer WebSocket connection')
+  // Payer establishes /api/v2/ws connection using single-use ticket (never plaintext token in URL)
+  for (let i = 0; i < 30 && !payerWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_')); i += 1) {
+    await payer.waitForTimeout(100)
+  }
+  assert.ok(
+    payerWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_') && !u.includes('token=')),
+    'Expected payer single-use ticket WebSocket connection',
+  )
 
   // 5. Guardian opens review and sees privacy-redacted view + establishes WS connection
   const openBtn = guardian.getByRole('button', { name: 'Open review' })
@@ -80,7 +86,13 @@ test('E2E Real Backend: Separate payer/guardian sessions, WS notification, redac
   await openBtn.click()
   await guardian.getByRole('heading', { name: 'Review requested' }).waitFor()
 
-  assert.ok(guardianWsUrls.some((u) => u.includes('/api/v2/ws?token=')), 'Expected guardian WebSocket connection')
+  for (let i = 0; i < 30 && !guardianWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_')); i += 1) {
+    await guardian.waitForTimeout(100)
+  }
+  assert.ok(
+    guardianWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_') && !u.includes('token=')),
+    'Expected guardian single-use ticket WebSocket connection',
+  )
 
   const guardianText = await guardian.locator('main').innerText()
   assert.doesNotMatch(guardianText, /55,000|Willow Supplies|KYC or verification request/)
@@ -297,3 +309,101 @@ test('E2E Real Backend: Admin Razorpay Test Mode enforces RBAC, live-key isolati
     await admin.getByText('Test order created on backend.').waitFor()
   }
 })
+
+test('E2E Real Backend: V5 Email+Password+OTP signup, Synthetic KYC, durable guardian invite/accept, and payment approval', { timeout: 60_000 }, async (t) => {
+  const browser = await launchBrowser(t)
+  const payerCtx = await browser.newContext()
+  const guardianCtx = await browser.newContext()
+  const payer = await payerCtx.newPage()
+  const guardian = await guardianCtx.newPage()
+
+  let paymentId = ''
+  t.after(() => cancelPaymentIfNonTerminal(paymentId))
+
+  const nonce = Date.now()
+  const payerEmail = `v5.payer.${nonce}@example.com`
+  const guardianEmail = `v5.guardian.${nonce}@example.com`
+  const password = 'PauseGuardV5Strong!'
+
+  // 1. Payer Email+Password+OTP signup
+  await payer.goto(`${origin}/payer/signup`)
+  await payer.getByLabel('Full name').fill('Asha Nair')
+  await payer.getByLabel('Email address').fill(payerEmail)
+  await payer.getByLabel('Password').fill(password)
+  await payer.getByRole('button', { name: 'Create account & send OTP' }).click()
+
+  const payerOtpNotice = payer.locator('.notice', { hasText: 'Local Mock OTP Preview:' })
+  await payerOtpNotice.waitFor()
+  const payerOtp = (await payerOtpNotice.locator('code').innerText()).trim()
+  await payer.getByLabel('Verification OTP code').fill(payerOtp)
+  await payer.getByRole('button', { name: 'Verify OTP & Sign in' }).click()
+  await payer.getByRole('heading', { name: 'Prepare a payment' }).waitFor()
+
+  // 2. Guardian Email+Password+OTP signup
+  await guardian.goto(`${origin}/guardian/signup`)
+  await guardian.getByLabel('Full name').fill('Ravi Menon')
+  await guardian.getByLabel('Email address').fill(guardianEmail)
+  await guardian.getByLabel('Password').fill(password)
+  await guardian.getByRole('button', { name: 'Create account & send OTP' }).click()
+
+  const guardianOtpNotice = guardian.locator('.notice', { hasText: 'Local Mock OTP Preview:' })
+  await guardianOtpNotice.waitFor()
+  const guardianOtp = (await guardianOtpNotice.locator('code').innerText()).trim()
+  await guardian.getByLabel('Verification OTP code').fill(guardianOtp)
+  await guardian.getByRole('button', { name: 'Verify OTP & Sign in' }).click()
+  await guardian.getByText('Waiting for a review request').waitFor()
+
+  // 3. Payer completes Synthetic KYC & creates durable guardian invitation
+  await payer.goto(`${origin}/payer/enrollment`)
+  await payer.getByLabel('Full legal name').fill('Asha Nair')
+  await payer.getByLabel(/Synthetic document reference/i).fill(`SYNTH-PAYER-${nonce}`)
+  await payer.getByRole('checkbox', { name: /consent to synthetic identity verification/i }).check()
+  await payer.getByRole('button', { name: 'Verify identity' }).click()
+  await payer.getByText(/Opaque Person Ref:/i).waitFor()
+
+  await payer.getByLabel('Guardian account email').fill(guardianEmail)
+  await payer.getByRole('checkbox', { name: /consent to sending redacted review requests/i }).check()
+  await payer.getByRole('button', { name: 'Send durable invitation' }).click()
+  const inviteNotice = payer.locator('.notice', { hasText: 'Local Mock Invite Token Preview' })
+  await inviteNotice.waitFor()
+  const inviteToken = (await inviteNotice.locator('code').innerText()).trim()
+  assert.ok(inviteToken.startsWith('pg_inv_'))
+
+  // 4. Guardian completes Synthetic KYC & accepts durable invitation via OTP
+  await guardian.goto(`${origin}/guardian/enrollment`)
+  await guardian.getByLabel('Full legal name').fill('Ravi Menon')
+  await guardian.getByLabel(/Synthetic document reference/i).fill(`SYNTH-GUARD-${nonce}`)
+  await guardian.getByRole('checkbox', { name: /consent to synthetic identity verification/i }).check()
+  await guardian.getByRole('button', { name: 'Verify identity' }).click()
+  await guardian.getByText(/Opaque Person Ref:/i).waitFor()
+
+  await guardian.getByLabel('Invite Token').fill(inviteToken)
+  await guardian.getByRole('button', { name: 'Request Invite OTP' }).click()
+  const inviteOtpNotice = guardian.locator('.notice', { hasText: 'Local Mock Invite OTP Preview:' })
+  await inviteOtpNotice.waitFor()
+  const inviteOtp = (await inviteOtpNotice.locator('code').innerText()).trim()
+
+  await guardian.getByLabel('Invite OTP Code').fill(inviteOtp)
+  await guardian.getByRole('checkbox', { name: /explicitly consent to serve as an independent guardian/i }).check()
+  await guardian.getByRole('button', { name: 'Verify & Accept Invitation' }).click()
+  await guardian.getByText('ACTIVE', { exact: true }).waitFor()
+
+  // 5. Payer creates high-risk payment -> Guardian reviews & approves -> Payer confirms -> EXECUTED
+  await payer.goto(`${origin}/payer`)
+  await payer.getByRole('button', { name: 'Check payment', exact: true }).click()
+  await payer.getByRole('heading', { name: 'Waiting for your guardian' }).waitFor()
+  const match = (await payer.locator('main').innerText()).match(/pg_[a-zA-Z0-9_-]+/)
+  if (match) paymentId = match[0]
+
+  await guardian.goto(`${origin}/guardian`)
+  const openBtn = guardian.getByRole('button', { name: 'Open review' })
+  await openBtn.waitFor()
+  await openBtn.click()
+  await guardian.getByRole('button', { name: 'Approve review' }).click()
+  await guardian.getByRole('heading', { name: 'Review approved' }).waitFor()
+
+  await payer.getByRole('heading', { name: 'Ready for your confirmation' }).waitFor()
+  await payer.getByRole('button', { name: 'Confirm simulated payment' }).click()
+  await payer.getByRole('heading', { name: 'Simulated payment completed' }).waitFor()
+})
+

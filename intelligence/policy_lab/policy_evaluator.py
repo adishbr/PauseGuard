@@ -411,6 +411,8 @@ class PolicyLabReport:
     category_counts: dict[str, int]
     profile_counts: dict[str, int]
     policy_metrics: dict[str, PolicyEvaluationMetrics]
+    scam_category_breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tier_distribution: dict[str, dict[str, int]] = field(default_factory=dict)
     is_synthetic: bool = True
     declaration: str = (
         "PauseGuard Policy Lab synthetic benchmark evaluation. "
@@ -425,6 +427,8 @@ class PolicyLabReport:
             "category_counts": self.category_counts,
             "profile_counts": self.profile_counts,
             "policy_metrics": {k: v.to_dict() for k, v in self.policy_metrics.items()},
+            "scam_category_breakdown": self.scam_category_breakdown,
+            "tier_distribution": self.tier_distribution,
             "is_synthetic": self.is_synthetic,
             "declaration": self.declaration,
         }
@@ -512,6 +516,11 @@ class PolicyLab:
         profile_counts = dict(Counter(s.profile_type for s in test_scenarios))
 
         policy_metrics: dict[str, PolicyEvaluationMetrics] = {}
+        tier_distribution: dict[str, dict[str, int]] = {}
+        scam_category_breakdown: dict[str, dict[str, Any]] = {
+            cat: {"total": count, "policies": {}}
+            for cat, count in sorted(category_counts.items())
+        }
 
         for pol in policies:
             if not pol.is_available:
@@ -521,15 +530,38 @@ class PolicyLab:
                 )
 
             # Evaluate each scenario strictly using features only
-            predictions = [pol.evaluate(feat).flagged for feat in extracted_features]
+            decisions = [pol.evaluate(feat) for feat in extracted_features]
+            predictions = [d.flagged for d in decisions]
+            tiers = [d.tier for d in decisions]
 
             metrics = calculate_evaluation_metrics(
                 policy_name=pol.name,
                 predictions=predictions,
                 ground_truth_labels=ground_truth_labels,
                 profile_types=profile_types,
+                tiers=tiers,
             )
             policy_metrics[pol.name] = metrics
+
+            tier_counts = Counter(tiers)
+            tier_distribution[pol.name] = {
+                "tier_0": int(tier_counts.get(0, 0)),
+                "tier_1": int(tier_counts.get(1, 0)),
+                "tier_2": int(tier_counts.get(2, 0)),
+                "tier_3": int(tier_counts.get(3, 0)),
+            }
+
+            for cat in scam_category_breakdown:
+                cat_flagged = sum(
+                    1
+                    for s, pred in zip(test_scenarios, predictions)
+                    if s.category.value == cat and pred
+                )
+                cat_total = scam_category_breakdown[cat]["total"]
+                scam_category_breakdown[cat]["policies"][pol.name] = {
+                    "flagged_count": cat_flagged,
+                    "flag_rate": round(cat_flagged / cat_total, 4) if cat_total > 0 else None,
+                }
 
         return PolicyLabReport(
             seed=seed,
@@ -538,5 +570,7 @@ class PolicyLab:
             category_counts=category_counts,
             profile_counts=profile_counts,
             policy_metrics=policy_metrics,
+            scam_category_breakdown=scam_category_breakdown,
+            tier_distribution=tier_distribution,
             is_synthetic=True,
         )

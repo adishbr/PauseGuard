@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sessionExpired } from '../services/accountApi.ts'
 import { isRealBackendMode } from '../services/backendMode.ts'
-import { ApiError, getPayment, paymentError } from '../services/paymentApi.ts'
+import { ApiError, getPayment, issueWsTicket, paymentError } from '../services/paymentApi.ts'
 import { terminalStatuses } from '../types/payment.ts'
 import type { Role } from '../types/payment.ts'
 
@@ -11,9 +11,9 @@ const wsSafetyPollMs = 10_000
 const wsPingMs = 25_000
 const maxWsRetries = 5
 
-function buildWebSocketUrl(token: string): string {
+function buildWebSocketUrl(ticket: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/api/v2/ws?token=${encodeURIComponent(token)}`
+  return `${protocol}//${window.location.host}/api/v2/ws?ticket=${encodeURIComponent(ticket)}`
 }
 
 export function usePayment(role: Role, token: string, id: string) {
@@ -49,6 +49,7 @@ export function usePayment(role: Role, token: string, id: string) {
     let request: AbortController | undefined
     let socket: WebSocket | undefined
     let wsConnected = false
+    let wsConnecting = false
     let wsFailures = 0
     let failures = 0
 
@@ -60,6 +61,7 @@ export function usePayment(role: Role, token: string, id: string) {
       clearTimeout(wsRetryTimer)
       clearInterval(heartbeatTimer)
       wsConnected = false
+      wsConnecting = false
       if (socket) {
         socket.onopen = null
         socket.onmessage = null
@@ -108,13 +110,16 @@ export function usePayment(role: Role, token: string, id: string) {
       }
     }
 
-    function connectWebSocket() {
+    async function connectWebSocket() {
       if (!active || authRevoked || !isRealBackendMode() || !token || isTerminal() || !navigator.onLine) return
       if (typeof WebSocket === 'undefined') return
-      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return
+      if (wsConnecting || (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING))) return
 
+      wsConnecting = true
       try {
-        const ws = new WebSocket(buildWebSocketUrl(token))
+        const ticketRes = await issueWsTicket(token)
+        if (!active || authRevoked || isTerminal() || !navigator.onLine) return
+        const ws = new WebSocket(buildWebSocketUrl(ticketRes.ticket))
         socket = ws
 
         ws.onopen = () => {
@@ -151,9 +156,8 @@ export function usePayment(role: Role, token: string, id: string) {
           if (socket === ws) socket = undefined
           wsConnected = false
           clearInterval(heartbeatTimer)
-          // 1008 = policy violation (invalid/expired token); do not reconnect.
+          // 1008 = policy violation (invalid/expired ticket); do not reconnect automatically without re-ticket.
           if (event.code === 1008) {
-            authRevoked = true
             return
           }
           if (!active || authRevoked || isTerminal() || !navigator.onLine) return
@@ -161,10 +165,16 @@ export function usePayment(role: Role, token: string, id: string) {
           if (wsFailures > maxWsRetries) return
           const delay = Math.min(10_000, 1_000 * 2 ** (wsFailures - 1))
           clearTimeout(wsRetryTimer)
-          wsRetryTimer = setTimeout(connectWebSocket, delay)
+          wsRetryTimer = setTimeout(() => void connectWebSocket(), delay)
         }
-      } catch {
+      } catch (err) {
         wsConnected = false
+        const statusCode = err instanceof ApiError ? err.status : 0
+        if (statusCode === 401 || statusCode === 403) {
+          authRevoked = true
+        }
+      } finally {
+        wsConnecting = false
       }
     }
 
@@ -190,12 +200,12 @@ export function usePayment(role: Role, token: string, id: string) {
     function reconnect() {
       if (!navigator.onLine || authRevoked || isTerminal()) return
       wsFailures = 0
-      connectWebSocket()
+      void connectWebSocket()
       refresh()
     }
 
     void poll()
-    connectWebSocket()
+    void connectWebSocket()
     window.addEventListener(sessionExpired, handleSessionExpired)
     window.addEventListener('online', reconnect)
     window.addEventListener('offline', offline)

@@ -278,4 +278,39 @@ class NotificationOutboxListResponse(BaseModel):
     total: int
 
 
+class BankIntentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    payment_id: str = Field(..., min_length=3, max_length=64)
+    rail: Literal["MOCK_UPI_NPCI", "MOCK_IMPS"] = "MOCK_UPI_NPCI"
+
+
+class BankIntentView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent_id: str
+    payment_id: str
+    payer_id: UUID
+    amount_paise: int
+    rail: str
+    adapter: str
+    settlement_status: str
+    is_mock: bool = True
+    created_at: datetime
+    settled_at: datetime | None = None
+
+
+class BankSettlementWebhookResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    accepted: bool
+    duplicate: bool = False
+    event_id: str
+    intent_id: str
+    payment_id: str
+    settlement_status: str
+    adapter: str
+
+
+
 

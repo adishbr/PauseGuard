@@ -179,25 +179,123 @@ async function fetchSafeLock(token: string, role: AppRole): Promise<boolean> {
   }
 }
 
-async function fetchBackendSession(token: string): Promise<DemoSession> {
+export interface V5SignupResult {
+  user_id: string
+  email: string
+  full_name: string
+  role: string
+  email_verified: boolean
+  requires_otp_verification: boolean
+  challenge_id: string
+  otp_expires_at: string
+  is_mock_otp_delivery: boolean
+  dev_otp_preview?: string | null
+  message: string
+}
+
+export interface V5OtpChallengeResult {
+  challenge_id: string
+  contact: string
+  purpose: string
+  channel: string
+  expires_at: string
+  is_mock_delivery: boolean
+  provider_name: string
+  dev_otp_preview?: string | null
+}
+
+export interface V5OtpVerifyResult {
+  challenge_id: string
+  contact: string
+  purpose: string
+  verified: boolean
+  email_verified: boolean
+  verified_at: string
+}
+
+export interface V5LoginResponse {
+  access_token: string
+  token_type: string
+  expires_at: string
+  user_id: string
+  email: string
+  full_name: string
+  role: string
+  identity_verified: boolean
+  is_synthetic: boolean
+}
+
+export interface V5IdentityAssurance {
+  verified: boolean
+  assurance_id?: string | null
+  user_id: string
+  trusted_person_ref?: string | null
+  provider?: string | null
+  assurance_level?: string | null
+  is_mock_assurance: boolean
+  revoked: boolean
+  verified_at?: string | null
+  expires_at?: string | null
+}
+
+export interface V5GuardianInvitation {
+  invitation_id: string
+  payer_id: string
+  guardian_user_id?: string | null
+  guardian_email: string
+  relationship: string
+  role_slot: 'primary' | 'backup'
+  notification_channel: string
+  status: string
+  consent_confirmed: boolean
+  expires_at: string
+  accepted_at?: string | null
+  revoked_at?: string | null
+  created_at: string
+  is_mock_invite_delivery: boolean
+  dev_invite_token_preview?: string | null
+}
+
+export interface V5GuardianInvitationList {
+  sent: V5GuardianInvitation[]
+  received: V5GuardianInvitation[]
+}
+
+function writeV5UserMeta(userId: string, name: string, contact: string) {
+  storageWrite('sessionStorage', `pauseguard:v5:user:${userId}`, JSON.stringify({ name, contact }))
+}
+
+function readV5UserMeta(userId: string): { name?: string; contact?: string } {
   try {
-    const demoRes = await request<BackendDemoSessionResponse>('/api/v2', '/demo/session', token)
-    const role = resolveBackendRole(demoRes.roles)
-    const safeLock = await fetchSafeLock(token, role)
-    return mapDemoSessionResponse(demoRes, safeLock)
-  } catch (error) {
-    // Fallback to GET /api/v2/profile when PR #24 /demo/session endpoint is not present (404).
-    if (!(error instanceof AccountError && error.status === 404)) throw error
+    const raw = storageRead('sessionStorage', `pauseguard:v5:user:${userId}`)
+    return raw ? (JSON.parse(raw) as { name?: string; contact?: string }) : {}
+  } catch {
+    return {}
+  }
+}
+
+async function fetchBackendSession(token: string): Promise<DemoSession> {
+  if (!token.startsWith('pg_v5_')) {
+    try {
+      const demoRes = await request<BackendDemoSessionResponse>('/api/v2', '/demo/session', token)
+      const role = resolveBackendRole(demoRes.roles)
+      const safeLock = await fetchSafeLock(token, role)
+      return mapDemoSessionResponse(demoRes, safeLock)
+    } catch (error) {
+      // Fallback to GET /api/v2/profile when PR #24 /demo/session endpoint is not present (404).
+      if (!(error instanceof AccountError && error.status === 404)) throw error
+    }
   }
 
   const actor = await request<BackendActorProfile>('/api/v2', '/profile', token)
   const serverRole = resolveBackendRole(actor.roles)
   const safeLock = await fetchSafeLock(token, serverRole)
+  const meta = readV5UserMeta(actor.user_id)
   const profile: DemoProfile = {
     id: actor.user_id,
     role: serverRole,
-    name: `${serverRole.charAt(0).toUpperCase() + serverRole.slice(1)} (${actor.user_id.slice(-4)})`,
-    contact: actor.user_id,
+    name: meta.name || `${serverRole.charAt(0).toUpperCase() + serverRole.slice(1)} (${actor.user_id.slice(-4)})`,
+    contact: meta.contact || actor.user_id,
     category: 'personal',
     language: 'en',
     largeText: false,
@@ -213,7 +311,7 @@ async function fetchBackendSession(token: string): Promise<DemoSession> {
   }
   return {
     token,
-    expiresAt: Date.now() + 30 * 60_000,
+    expiresAt: Date.now() + 12 * 60 * 60_000,
     profile,
   }
 }
@@ -310,6 +408,9 @@ export const accountApi = {
       return request(demoAccountPath, '/session', token, undefined, 'DELETE')
     }
     try {
+      if (token.startsWith('pg_v5_')) {
+        return await request('/api/v2', '/auth/logout', token, {}, 'POST')
+      }
       return await request('/api/v2', '/demo/session', token, undefined, 'DELETE')
     } catch (error) {
       if (error instanceof AccountError && (error.status === 404 || error.status === 401)) {
@@ -317,6 +418,137 @@ export const accountApi = {
       }
       throw error
     }
+  },
+
+  v5Signup: async (payload: {
+    email: string
+    password: string
+    fullName: string
+    role: 'payer' | 'guardian'
+  }): Promise<V5SignupResult> => {
+    return request<V5SignupResult>('/api/v2', '/auth/signup', undefined, {
+      email: payload.email.trim(),
+      password: payload.password,
+      full_name: payload.fullName.trim(),
+      role: payload.role,
+    })
+  },
+
+  v5RequestOtp: async (payload: {
+    contact: string
+    purpose: 'signup_email' | 'login_step_up' | 'guardian_invite'
+    channel?: 'email' | 'sms_stub'
+  }): Promise<V5OtpChallengeResult> => {
+    return request<V5OtpChallengeResult>('/api/v2', '/auth/otp/challenge', undefined, {
+      contact: payload.contact.trim(),
+      purpose: payload.purpose,
+      channel: payload.channel ?? 'email',
+    })
+  },
+
+  v5VerifyOtp: async (payload: { challengeId: string; otpCode: string }): Promise<V5OtpVerifyResult> => {
+    return request<V5OtpVerifyResult>('/api/v2', '/auth/otp/verify', undefined, {
+      challenge_id: payload.challengeId,
+      otp_code: payload.otpCode.trim(),
+    })
+  },
+
+  v5Login: async (role: AppRole, email: string, password: string): Promise<DemoSession> => {
+    const res = await request<V5LoginResponse>('/api/v2', '/auth/login', undefined, {
+      email: email.trim(),
+      password,
+    })
+    const serverRole = resolveBackendRole([res.role])
+    if (serverRole !== role) {
+      throw new AccountError(403, `Forbidden: account holds role "${serverRole}", not "${role}".`)
+    }
+    writeV5UserMeta(res.user_id, res.full_name, res.email)
+    const safeLock = await fetchSafeLock(res.access_token, serverRole)
+    const parsedExpiry = Date.parse(res.expires_at)
+    return {
+      token: res.access_token,
+      expiresAt: Number.isFinite(parsedExpiry) ? parsedExpiry : Date.now() + 12 * 60 * 60_000,
+      profile: {
+        id: res.user_id,
+        role: serverRole,
+        sample: false,
+        name: res.full_name,
+        contact: res.email,
+        category: 'personal',
+        language: 'en',
+        largeText: false,
+        organization: '',
+        recurringSupplier: '',
+        thresholdPaise: null,
+        notifications: true,
+        quietStart: '',
+        quietEnd: '',
+        callConsent: false,
+        safeLock,
+      },
+    }
+  },
+
+  identityStatus: async (token: string): Promise<V5IdentityAssurance> => {
+    return request<V5IdentityAssurance>('/api/v2', '/identity/status', token)
+  },
+
+  identityVerify: async (
+    token: string,
+    payload: { fullName: string; syntheticDocumentRef: string; consentConfirmed: boolean },
+  ): Promise<V5IdentityAssurance> => {
+    return request<V5IdentityAssurance>('/api/v2', '/identity/verify', token, {
+      provider: 'synthetic_local_idp',
+      full_name: payload.fullName.trim(),
+      synthetic_document_ref: payload.syntheticDocumentRef.trim(),
+      consent_confirmed: payload.consentConfirmed,
+    })
+  },
+
+  v5Invitations: async (token: string): Promise<V5GuardianInvitationList> => {
+    return request<V5GuardianInvitationList>('/api/v2', '/guardian/invitations', token)
+  },
+
+  createV5Invitation: async (
+    token: string,
+    payload: {
+      guardianEmail: string
+      relationship: string
+      roleSlot?: 'primary' | 'backup'
+      notificationChannel?: 'in_app' | 'email' | 'push' | 'sms'
+    },
+  ): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', '/guardian/invitations', token, {
+      guardian_email: payload.guardianEmail.trim(),
+      relationship: payload.relationship.trim() || 'family',
+      role_slot: payload.roleSlot ?? 'primary',
+      notification_channel: payload.notificationChannel ?? 'in_app',
+    })
+  },
+
+  acceptV5Invitation: async (
+    token: string,
+    invitationId: string,
+    payload: { inviteToken: string; otpChallengeId: string; otpCode: string; explicitConsent: boolean },
+  ): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/accept`, token, {
+      invite_token: payload.inviteToken.trim(),
+      otp_challenge_id: payload.otpChallengeId.trim(),
+      otp_code: payload.otpCode.trim(),
+      explicit_consent: payload.explicitConsent,
+    })
+  },
+
+  declineV5Invitation: async (token: string, invitationId: string): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/decline`, token, {})
+  },
+
+  revokeV5Invitation: async (token: string, invitationId: string): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/revoke`, token, {})
+  },
+
+  suspendV5Invitation: async (token: string, invitationId: string, reason = 'suspected_compromise'): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/suspend`, token, { reason })
   },
 
   save: async (token: string, changes: ProfileUpdate): Promise<DemoProfile> => {

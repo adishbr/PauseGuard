@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 
 from app.api.account import router as account_router
+from app.api.bank import router as bank_router
 from app.api.guardian import router as guardian_router
 from app.api.health import router as health_router
 from app.api.notifications import router as notifications_router
@@ -57,6 +58,7 @@ def create_app(
     application.include_router(notifications_router)
     application.include_router(payments_router)
     application.include_router(account_router)
+    application.include_router(bank_router)
     application.include_router(safe_lock_router)
     application.include_router(safety_router)
     application.include_router(audit_router)

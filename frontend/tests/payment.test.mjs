@@ -700,4 +700,54 @@ test('provisionedIdentityError explains server-enforced synthetic contacts per r
   assert.match(adminErr.message, /Open sample admin/)
 })
 
+test('V5 accountApi methods route to /api/v2/auth, /api/v2/identity, and /api/v2/guardian/invitations cleanly', async () => {
+  const calls = []
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method ?? 'GET', headers: init.headers, body: init.body })
+    const u = String(url)
+    const jsonHeaders = { 'content-type': 'application/json' }
+    if (u.endsWith('/api/v2/auth/signup')) {
+      return new Response(JSON.stringify({
+        user_id: 'u1', email: 'v5payer@example.com', full_name: 'Asha V5', role: 'payer',
+        verification_status: 'PENDING', challenge_id: 'ch_1', dev_otp_preview: '123456',
+      }), { status: 201, headers: jsonHeaders })
+    }
+    if (u.endsWith('/api/v2/auth/login')) {
+      return new Response(JSON.stringify({
+        access_token: 'pg_v5_tok_123', user_id: 'u1', role: 'payer', email: 'v5payer@example.com',
+        full_name: 'Asha V5', expires_at: '2026-11-15T00:00:00Z', email_verified: true, assurance_level: 'UNVERIFIED',
+      }), { status: 200, headers: jsonHeaders })
+    }
+    if (u.endsWith('/api/v2/identity/verify')) {
+      return new Response(JSON.stringify({
+        verified: true, trusted_person_ref: 'tpr_abc', provider: 'synthetic_local_idp',
+        assurance_level: 'SYNTHETIC_DEMO', verified_at: '2026-11-14T00:00:00Z',
+        expires_at: '2027-02-14T00:00:00Z', revoked: false, is_mock_assurance: true,
+      }), { status: 200, headers: jsonHeaders })
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: jsonHeaders })
+  }
+  try {
+    const signupRes = await accountApi.v5Signup({
+      email: 'v5payer@example.com', password: 'StrongPassword123!', fullName: 'Asha V5', role: 'payer',
+    })
+    assert.equal(signupRes.challenge_id, 'ch_1')
+    const session = await accountApi.v5Login('payer', 'v5payer@example.com', 'StrongPassword123!')
+    assert.equal(session.token, 'pg_v5_tok_123')
+    assert.equal(session.profile.name, 'Asha V5')
+    assert.equal(session.profile.role, 'payer')
+    const assurance = await accountApi.identityVerify('pg_v5_tok_123', {
+      fullName: 'Asha V5', syntheticDocumentRef: 'SYNTH-001', consentConfirmed: true,
+    })
+    assert.equal(assurance.verified, true)
+    assert.equal(assurance.trusted_person_ref, 'tpr_abc')
+    assert.equal(calls.length, 4)
+    assert.ok(calls.some((c) => c.url.endsWith('/api/v2/safe-lock')))
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})
+
+
 

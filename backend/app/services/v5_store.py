@@ -119,6 +119,20 @@ class MockNotificationOutboxRecord:
     delivered_at: datetime | None
 
 
+@dataclass
+class MockBankIntentRecord:
+    intent_id: str
+    payment_id: str
+    payer_id: UUID
+    amount_paise: int
+    rail: str
+    adapter: str
+    settlement_status: str
+    is_mock: bool
+    created_at: datetime
+    settled_at: datetime | None = None
+
+
 class V5MockIdentityStore:
     """Thread-safe container attached to FastAPI app.state for local mock mode."""
 
@@ -132,6 +146,9 @@ class V5MockIdentityStore:
         self.invitations_by_id: dict[UUID, MockGuardianInvitationRecord] = {}
         self.ws_tickets_by_hash: dict[str, MockWebSocketTicketRecord] = {}
         self.notification_outbox: list[MockNotificationOutboxRecord] = []
+        self.bank_intents_by_id: dict[str, MockBankIntentRecord] = {}
+        self.bank_intents_by_payment: dict[str, str] = {}
+        self.bank_webhook_events_seen: dict[str, str] = {}
 
 
 def get_or_create_v5_mock_store(app_state: object) -> V5MockIdentityStore:
