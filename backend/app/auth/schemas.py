@@ -428,6 +428,16 @@ class PaymentRiskExplanationResponse(BaseModel):
 # Razorpay Test Mode Merchant Sandbox Schemas
 # ---------------------------------------------------------------------------
 
+class RazorpayConfigResponse(BaseModel):
+    """Non-secret Razorpay Test Mode configuration metadata for Admin Checkout SDK."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(True)
+    mode: str = Field("test", pattern="^test$")
+    key_id: str = Field(..., description="Validated public Razorpay Test Mode key ID (rzp_test_*)")
+
+
 class RazorpayOrderCreateRequest(BaseModel):
     """Request to create an isolated Razorpay Test Mode merchant order."""
 

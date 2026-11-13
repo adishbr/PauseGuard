@@ -240,3 +240,60 @@ test('E2E Real Backend: Safe-Lock blocks payments (423), network disconnect reco
   await payer.goto(`${origin}/payer`)
   await payer.getByRole('heading', { name: 'Continue to PauseGuard' }).waitFor({ timeout: 10_000 })
 })
+
+test('E2E Real Backend: Admin Razorpay Test Mode enforces RBAC, live-key isolation, and fail-closed or active test checkout', { timeout: 45_000 }, async (t) => {
+  const browser = await launchBrowser(t)
+  const adminCtx = await browser.newContext()
+  const admin = await adminCtx.newPage()
+
+  // 1. Payer token is strictly forbidden from Razorpay sandbox endpoints (403)
+  const pSession = await (
+    await fetch(`${origin}/api/v2/demo/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'payer', sample: true }),
+    })
+  ).json()
+  const payerConfigCheck = await fetch(`${origin}/api/v2/sandbox/razorpay/config`, {
+    headers: { Authorization: `Bearer ${pSession.token}` },
+  })
+  assert.equal(payerConfigCheck.status, 403)
+
+  const payerOrderCheck = await fetch(`${origin}/api/v2/sandbox/razorpay/orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pSession.token}` },
+    body: JSON.stringify({ amount_paise: 50000 }),
+  })
+  assert.equal(payerOrderCheck.status, 403)
+
+  // 2. Admin signs in and opens Mode B
+  await admin.goto(`${origin}/admin/login`)
+  await admin.getByRole('button', { name: 'Open sample admin' }).click()
+  await admin.getByRole('heading', { name: /Payment Testing/i }).waitFor()
+  await admin.getByRole('tab', { name: /Mode B — Razorpay Test Mode/i }).click()
+
+  // Probe live backend config availability directly using the active admin session
+  const adminToken = await admin.evaluate(() => sessionStorage.getItem('pauseguard:demo:session:admin'))
+  assert.ok(adminToken, 'Expected admin session token in sessionStorage')
+  const configRes = await fetch(`${origin}/api/v2/sandbox/razorpay/config`, {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  })
+
+  if (configRes.status === 503) {
+    // Default unconfigured local server must fail closed cleanly in UI
+    await admin.getByText('TEST ONLY · Backend Disabled / Unavailable').waitFor()
+    assert.equal(await admin.getByRole('button', { name: 'Create Test Order' }).isDisabled(), true)
+    assert.equal(await admin.getByRole('button', { name: 'Open Razorpay Test Checkout' }).isDisabled(), true)
+  } else {
+    assert.equal(configRes.status, 200)
+    const configBody = await configRes.json()
+    assert.equal(configBody.enabled, true)
+    assert.equal(configBody.mode, 'test')
+    assert.ok(configBody.key_id.startsWith('rzp_test_'))
+    assert.equal('key_secret' in configBody, false)
+
+    await admin.getByText('TEST ONLY · Sandbox Active').waitFor()
+    await admin.getByRole('button', { name: 'Create Test Order' }).click()
+    await admin.getByText('Test order created on backend.').waitFor()
+  }
+})

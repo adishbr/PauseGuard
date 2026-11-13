@@ -78,6 +78,29 @@ export function createMockApi(clock: () => number = Date.now) {
   const payments = new Map<string, PaymentRecord>()
   const creations = new Map<string, PaymentRecord>()
   const auditLog: MockAuditEntry[] = []
+  const razorpayOrders = new Map<string, {
+    id: string
+    razorpay_order_id: string
+    admin_id: string
+    amount_paise: number
+    currency: string
+    status: string
+    receipt: string | null
+    key_id: string
+    created_at: string
+    payments: Array<{
+      id: string
+      status: string
+      amount_paise: number
+      method: string
+      verified_at: string
+    }>
+  }>()
+  const razorpayIdempotency = new Map<string, {
+    callerId: string
+    hash: string
+    response: Record<string, unknown>
+  }>()
 
   function recordAudit(record: PaymentRecord, actorRole: string, event: string, fromStatus: Status | null) {
     const seq = auditLog.length + 1
@@ -179,47 +202,121 @@ export function createMockApi(clock: () => number = Date.now) {
         return verifyAuditChain()
       }
 
-      if (route.startsWith('/sandbox/razorpay') || route.startsWith('/admin/razorpay')) {
+      if (route.startsWith('/sandbox/razorpay')) {
         if (actor.role !== 'admin') throw new MockError(403, 'Forbidden: Operation requires admin role')
-        if (method === 'GET' && route.endsWith('/config')) {
-          return { key_id: 'rzp_test_mock_key' }
+        if (method === 'GET' && route === '/sandbox/razorpay/config') {
+          return {
+            enabled: true,
+            mode: 'test',
+            key_id: 'rzp_test_mock_sandbox_key',
+          }
         }
-        if (method === 'POST' && (route.endsWith('/orders') || route.endsWith('/order'))) {
+        if (method === 'POST' && route === '/sandbox/razorpay/orders') {
           const body = await readBody(request)
-          const amount_paise = body.amount_paise ?? 50000
+          const amount_paise = body.amount_paise
+          const currency = typeof body.currency === 'string' ? body.currency : 'INR'
+          if (typeof amount_paise !== 'number' || !Number.isSafeInteger(amount_paise) || amount_paise <= 0) {
+            throw new MockError(422, 'amount_paise must be a strictly positive integer.')
+          }
+          if (currency !== 'INR') {
+            throw new MockError(422, 'currency must strictly be INR.')
+          }
+          const headerIdem = request.headers['idempotency-key'] ?? request.headers['x-idempotency-key']
+          const rawIdem = Array.isArray(headerIdem) ? headerIdem[0] : headerIdem
+          const effectiveKey = (typeof rawIdem === 'string' && rawIdem.trim())
+            ? rawIdem.trim()
+            : (typeof body.idempotency_key === 'string' && body.idempotency_key.trim() ? body.idempotency_key.trim() : null)
+          const receipt = typeof body.receipt === 'string' && body.receipt.trim() ? body.receipt.trim() : null
+          const notes = (body.notes && typeof body.notes === 'object' && !Array.isArray(body.notes)) ? body.notes : {}
+          const reqHash = JSON.stringify({ amount_paise, currency, receipt, notes })
+          if (effectiveKey) {
+            const cached = razorpayIdempotency.get(effectiveKey)
+            if (cached) {
+              if (cached.callerId !== actor.id || cached.hash !== reqHash) {
+                throw new MockError(409, 'Idempotency key reused with conflicting request parameters')
+              }
+              return cached.response
+            }
+          }
           const order_id = `order_${randomUUID().replace(/-/g, '').slice(0, 14)}`
           const internal_id = `rzp_ord_${randomUUID().replace(/-/g, '').slice(0, 12)}`
-          return {
+          const created_at = new Date(clock()).toISOString()
+          const orderRecord = {
+            id: internal_id,
+            razorpay_order_id: order_id,
+            admin_id: actor.id,
+            amount_paise,
+            currency: 'INR',
+            status: 'created',
+            receipt,
+            key_id: 'rzp_test_mock_sandbox_key',
+            created_at,
+            payments: [],
+          }
+          razorpayOrders.set(order_id, orderRecord)
+          razorpayOrders.set(internal_id, orderRecord)
+          const response = {
             id: internal_id,
             razorpay_order_id: order_id,
             amount_paise,
             currency: 'INR',
             status: 'created',
-            key_id: 'rzp_test_mock_key',
-            created_at: new Date(clock()).toISOString(),
+            receipt,
+            key_id: 'rzp_test_mock_sandbox_key',
+            created_at,
           }
+          if (effectiveKey) {
+            razorpayIdempotency.set(effectiveKey, { callerId: actor.id, hash: reqHash, response })
+          }
+          return response
         }
-        if (method === 'POST' && route.endsWith('/verify')) {
+        if (method === 'POST' && route === '/sandbox/razorpay/verify') {
           const body = await readBody(request)
+          const rzpOrderId = typeof body.razorpay_order_id === 'string' ? body.razorpay_order_id : ''
+          const rzpPaymentId = typeof body.razorpay_payment_id === 'string' ? body.razorpay_payment_id : ''
+          const rzpSignature = typeof body.razorpay_signature === 'string' ? body.razorpay_signature : ''
+          if (!rzpOrderId || !rzpPaymentId || !/^[a-fA-F0-9]{64}$/.test(rzpSignature) || /^0{64}$/.test(rzpSignature)) {
+            throw new MockError(400, 'Invalid payment signature; authenticity verification failed')
+          }
+          const stored = razorpayOrders.get(rzpOrderId)
+          if (!stored) {
+            throw new MockError(404, `No matching order found for Razorpay order ID ${rzpOrderId}`)
+          }
+          if (stored.admin_id !== actor.id) {
+            throw new MockError(403, 'Unauthorized: Admin does not own this merchant order')
+          }
+          const verified_at = new Date(clock()).toISOString()
+          stored.status = 'paid'
+          const existingPay = stored.payments.find((p) => p.id === rzpPaymentId)
+          if (!existingPay) {
+            stored.payments.push({
+              id: rzpPaymentId,
+              status: 'captured',
+              amount_paise: stored.amount_paise,
+              method: 'upi',
+              verified_at,
+            })
+          }
           return {
-            order_id: body.razorpay_order_id,
-            razorpay_order_id: body.razorpay_order_id,
-            razorpay_payment_id: body.razorpay_payment_id || `pay_${randomUUID().replace(/-/g, '').slice(0, 14)}`,
-            status: 'captured',
-            amount_paise: 50000,
-            currency: 'INR',
+            verified: true,
+            status: 'paid',
+            order_id: stored.id,
+            razorpay_order_id: stored.razorpay_order_id,
+            razorpay_payment_id: rzpPaymentId,
+            amount_paise: stored.amount_paise,
+            currency: stored.currency,
+            reconciled_with_provider: true,
+            verified_at,
           }
         }
-        if (method === 'GET' && (route.includes('/orders/') || route.includes('/status/'))) {
-          const orderId = route.split('/').pop()
-          return {
-            id: orderId,
-            razorpay_order_id: orderId,
-            status: 'created',
-            amount_paise: 50000,
-            currency: 'INR',
-            payments: [],
+        if (method === 'GET' && route.startsWith('/sandbox/razorpay/orders/')) {
+          const orderId = decodeURIComponent(route.slice('/sandbox/razorpay/orders/'.length))
+          const stored = razorpayOrders.get(orderId)
+          if (!stored) throw new MockError(404, 'Order not found')
+          if (stored.admin_id !== actor.id) {
+            throw new MockError(403, 'Unauthorized: Admin does not own this merchant order')
           }
+          return { ...stored, payments: [...stored.payments] }
         }
       }
 

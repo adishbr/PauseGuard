@@ -9,8 +9,10 @@
  *    synthetic payer context, preserving Safe-Lock, warnings, guardian review, and confirmation.
  *
  * Mode B (Razorpay Test Mode):
- *  - All functions are stubs that reject with AdminApiError until Komal's FastAPI backend
- *    provides the required sandbox endpoints.
+ *  - Admin-only isolated merchant sandbox connected to /api/v2/sandbox/razorpay/*.
+ *  - Uses only backend-supplied public Test Mode keys (rzp_test_*); rejects rzp_live_* fail-closed.
+ *  - Server-side HMAC signature verification & provider reconciliation are required before verified state.
+ *  - Completely decoupled from PauseGuard P2P / Mock UPI payment state and ledger.
  *
  * Security invariants:
  *  - Razorpay key_secret must NEVER appear in this file or any frontend source.
@@ -21,7 +23,12 @@
 
 import { demoAccountPath } from '../types/account.ts'
 import type { DemoSession } from '../types/account.ts'
-import type { AdminAuditResponse, AuditVerifyResult } from '../types/admin.ts'
+import type {
+  AdminAuditResponse,
+  AuditVerifyResult,
+  RazorpayConfigResult,
+  RazorpayOrderStatusResult,
+} from '../types/admin.ts'
 import { AccountError, sessionExpired } from './accountApi.ts'
 import { isRealBackendMode } from './backendMode.ts'
 
@@ -40,9 +47,17 @@ export {
   paymentError,
 } from './paymentApi.ts'
 
-async function adminRequest<T>(url: string, adminToken: string, body?: object): Promise<T> {
+async function adminRequest<T>(
+  url: string,
+  adminToken: string,
+  body?: object,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   const headers = new Headers({ Authorization: `Bearer ${adminToken}` })
   if (body) headers.set('Content-Type', 'application/json')
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) headers.set(k, v)
+  }
 
   let response: Response
   try {
@@ -58,7 +73,7 @@ async function adminRequest<T>(url: string, adminToken: string, body?: object): 
   }
 
   const data = await response.json().catch(() => undefined)
-  if (response.status === 401 && adminToken) {
+  if (response.status === 401 && adminToken && typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(sessionExpired, { detail: adminToken }))
   }
   if (!response.ok || !data) {
@@ -118,6 +133,14 @@ export const adminMockApi = {
 // Mode B — Razorpay Test Mode
 // ---------------------------------------------------------------------------
 
+export const RAZORPAY_CHECKOUT_SCRIPT_URL = 'https://checkout.razorpay.com/v1/checkout.js'
+
+export interface RazorpayOrderCreateOptions {
+  receipt?: string
+  notes?: Record<string, string>
+  idempotencyKey?: string
+}
+
 export interface RazorpayOrderResult {
   id: string
   razorpay_order_id: string
@@ -125,56 +148,172 @@ export interface RazorpayOrderResult {
   currency: string
   status: string
   receipt?: string | null
-  key_id?: string
+  key_id: string
   created_at: string
 }
 
 export interface RazorpayVerifyResult {
+  verified: boolean
+  status: string
   order_id: string
   razorpay_order_id: string
   razorpay_payment_id: string
-  status: string
   amount_paise: number
   currency: string
+  reconciled_with_provider: boolean
+  verified_at: string
+}
+
+/**
+ * Validates that a Razorpay key ID is strictly a Test Mode public key (`rzp_test_*`).
+ * Rejects live keys (`rzp_live_*`), empty strings, and unexpected formats fail-closed.
+ */
+export function validateRazorpayTestKey(keyId: unknown): string {
+  if (typeof keyId !== 'string') {
+    throw new AdminApiError('Razorpay Test Mode public key is missing.')
+  }
+  const trimmed = keyId.trim()
+  if (trimmed.startsWith('rzp_live_')) {
+    throw new AdminApiError('Security block: live Razorpay keys (rzp_live_*) are strictly prohibited.')
+  }
+  if (!trimmed.startsWith('rzp_test_') || trimmed.length <= 'rzp_test_'.length) {
+    throw new AdminApiError('Invalid Razorpay key format: only Test Mode keys (rzp_test_*) are allowed.')
+  }
+  return trimmed
+}
+
+let razorpayScriptPromise: Promise<void> | null = null
+
+/**
+ * Dynamically loads the Razorpay Checkout SDK only when an admin initiates Test Mode checkout.
+ * Rejects cleanly if offline, blocked, or running outside a browser document context.
+ */
+export function loadRazorpayCheckoutScript(scriptUrl = RAZORPAY_CHECKOUT_SCRIPT_URL): Promise<void> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return Promise.reject(new AdminApiError('Razorpay Checkout requires a browser environment.'))
+  }
+  const win = window as unknown as { Razorpay?: unknown }
+  if (typeof win.Razorpay === 'function') {
+    return Promise.resolve()
+  }
+  if (razorpayScriptPromise) return razorpayScriptPromise
+
+  razorpayScriptPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${scriptUrl}"]`)
+    if (existing) {
+      if (typeof win.Razorpay === 'function') {
+        resolve()
+        return
+      }
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => {
+        razorpayScriptPromise = null
+        reject(new AdminApiError('Could not load Razorpay Checkout SDK from checkout.razorpay.com.'))
+      }, { once: true })
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = scriptUrl
+    script.async = true
+    script.onload = () => {
+      if (typeof win.Razorpay === 'function') {
+        resolve()
+      } else {
+        razorpayScriptPromise = null
+        reject(new AdminApiError('Razorpay Checkout SDK loaded without exposing window.Razorpay.'))
+      }
+    }
+    script.onerror = () => {
+      script.remove()
+      razorpayScriptPromise = null
+      reject(new AdminApiError('Could not load Razorpay Checkout SDK. Check network access to checkout.razorpay.com.'))
+    }
+    document.head.appendChild(script)
+  })
+  return razorpayScriptPromise
 }
 
 export const razorpayApi = {
   /**
-   * Creates an isolated Razorpay test merchant order via POST /api/v2/sandbox/razorpay/orders (Admin only).
+   * Retrieves the Razorpay Test Mode availability and public key_id (Admin only).
+   * key_secret and webhook_secret are never returned to the frontend.
    */
-  createOrder: async (token: string, amountPaise: number, notes?: Record<string, string>): Promise<RazorpayOrderResult> => {
-    return adminRequest<RazorpayOrderResult>('/api/v2/sandbox/razorpay/orders', token, {
-      amount_paise: amountPaise,
-      currency: 'INR',
-      notes,
-    })
+  getConfig: async (token: string, baseUrl = ''): Promise<RazorpayConfigResult> => {
+    const result = await adminRequest<RazorpayConfigResult>(
+      `${baseUrl}/api/v2/sandbox/razorpay/config`,
+      token,
+    )
+    if (!result.enabled || result.mode !== 'test') {
+      throw new AdminApiError('Razorpay Test Mode sandbox is currently disabled on the backend.')
+    }
+    const safeKeyId = validateRazorpayTestKey(result.key_id)
+    return {
+      enabled: true,
+      mode: 'test',
+      key_id: safeKeyId,
+    }
   },
 
   /**
-   * Retrieves the Razorpay public test key_id (Admin only).
-   * key_secret is never sent to the frontend.
+   * Creates an isolated Razorpay test merchant order via POST /api/v2/sandbox/razorpay/orders (Admin only).
    */
-  getConfig: async (_token: string): Promise<{ key_id: string }> => {
-    return { key_id: 'rzp_test_mock_key' }
+  createOrder: async (
+    token: string,
+    amountPaise: number,
+    options?: RazorpayOrderCreateOptions | Record<string, string>,
+    baseUrl = '',
+  ): Promise<RazorpayOrderResult> => {
+    const isStructured =
+      options &&
+      ('receipt' in options || 'notes' in options || 'idempotencyKey' in options)
+    const opts: RazorpayOrderCreateOptions = isStructured
+      ? (options as RazorpayOrderCreateOptions)
+      : { notes: options as Record<string, string> | undefined }
+
+    const body: Record<string, unknown> = {
+      amount_paise: amountPaise,
+      currency: 'INR',
+    }
+    if (opts.receipt) body.receipt = opts.receipt
+    if (opts.notes && Object.keys(opts.notes).length > 0) body.notes = opts.notes
+    if (opts.idempotencyKey) body.idempotency_key = opts.idempotencyKey
+
+    const headers = opts.idempotencyKey ? { 'Idempotency-Key': opts.idempotencyKey } : undefined
+    const order = await adminRequest<RazorpayOrderResult>(
+      `${baseUrl}/api/v2/sandbox/razorpay/orders`,
+      token,
+      body,
+      headers,
+    )
+    return {
+      ...order,
+      key_id: validateRazorpayTestKey(order.key_id),
+    }
   },
 
   /**
    * Verifies checkout payment signature via POST /api/v2/sandbox/razorpay/verify (Admin only).
-   * HMAC signature verification happens server-side only.
+   * HMAC signature verification and provider reconciliation happen server-side only.
    */
   verifyPayment: async (
     token: string,
     payload: { razorpay_payment_id: string; razorpay_order_id: string; razorpay_signature: string },
+    baseUrl = '',
   ): Promise<RazorpayVerifyResult> => {
-    return adminRequest<RazorpayVerifyResult>('/api/v2/sandbox/razorpay/verify', token, payload)
+    return adminRequest<RazorpayVerifyResult>(
+      `${baseUrl}/api/v2/sandbox/razorpay/verify`,
+      token,
+      payload,
+    )
   },
 
   /**
    * Fetches stored merchant order and payment history via GET /api/v2/sandbox/razorpay/orders/{order_id} (Admin only).
    */
-  getOrderStatus: async (token: string, orderId: string): Promise<Record<string, unknown>> => {
-    return adminRequest<Record<string, unknown>>(
-      `/api/v2/sandbox/razorpay/orders/${encodeURIComponent(orderId)}`,
+  getOrderStatus: async (token: string, orderId: string, baseUrl = ''): Promise<RazorpayOrderStatusResult> => {
+    return adminRequest<RazorpayOrderStatusResult>(
+      `${baseUrl}/api/v2/sandbox/razorpay/orders/${encodeURIComponent(orderId)}`,
       token,
     )
   },

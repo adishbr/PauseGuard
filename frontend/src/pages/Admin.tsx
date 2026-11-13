@@ -5,11 +5,26 @@ import { beneficiaries, purposes, scenarios } from '../../mocks/scenarios.ts'
 import { Icon } from '../components/Icon.tsx'
 import { PaymentStatus } from '../components/PaymentStatus.tsx'
 import { accountApi, AccountError } from '../services/accountApi.ts'
-import { adminCreatePayment, adminMockApi, paymentError } from '../services/adminApi.ts'
+import {
+  adminCreatePayment,
+  adminMockApi,
+  AdminApiError,
+  loadRazorpayCheckoutScript,
+  paymentError,
+  razorpayApi,
+  validateRazorpayTestKey,
+} from '../services/adminApi.ts'
+import type { RazorpayOrderResult, RazorpayVerifyResult } from '../services/adminApi.ts'
 import { decimalRupees, formatRupees, toPaise } from '../services/demoSession.ts'
 import type { DemoSession } from '../types/account.ts'
 import { razorpayRequiredEndpoints } from '../types/admin.ts'
-import type { AdminAuditEntry, AdminTestMode, AuditVerifyResult } from '../types/admin.ts'
+import type {
+  AdminAuditEntry,
+  AdminTestMode,
+  AuditVerifyResult,
+  RazorpayConfigResult,
+  RazorpayOrderStatusResult,
+} from '../types/admin.ts'
 import type { PayerPayment } from '../types/payment.ts'
 
 type DemoScenario = (typeof scenarios)[number]
@@ -528,86 +543,667 @@ function MockUpiPanel({ token, accountId }: { token: string; accountId: string }
   )
 }
 
-// ─── Mode B — Razorpay Test Mode Panel (Disabled Preview) ─────────────────────
+// ─── Mode B — Razorpay Test Mode Panel ────────────────────────────────────────
 
-function RazorpayPanel() {
+type RazorpayCheckoutLifecycle =
+  | 'idle'
+  | 'creating'
+  | 'ready_for_checkout'
+  | 'opening_checkout'
+  | 'verifying'
+  | 'verified'
+  | 'cancelled'
+  | 'failed'
+
+interface RazorpayCheckoutSuccessPayload {
+  razorpay_payment_id: string
+  razorpay_order_id?: string
+  razorpay_signature: string
+}
+
+interface RazorpayCheckoutInstance {
+  open: () => void
+  on?: (event: string, cb: (payload: { error?: { description?: string; reason?: string; code?: string } }) => void) => void
+}
+
+type RazorpayCheckoutCtor = new (options: Record<string, unknown>) => RazorpayCheckoutInstance
+
+function createIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `rzp-idem-${crypto.randomUUID()}`
+  }
+  return `rzp-idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function RazorpayPanel({
+  token,
+  accountId,
+  onStatusChange,
+}: {
+  token: string
+  accountId: string
+  onStatusChange?: (status: 'checking' | 'ready' | 'unavailable') => void
+}) {
+  const [configState, setConfigState] = useState<'checking' | 'ready' | 'unavailable'>('checking')
+  const [config, setConfig] = useState<RazorpayConfigResult | null>(null)
+  const [configError, setConfigError] = useState('')
+
+  const [amount, setAmount] = useState('500.00')
+  const [receipt, setReceipt] = useState('')
+  const [notesPurpose, setNotesPurpose] = useState('merchant_checkout_test')
+  const [orderIdempotencyKey, setOrderIdempotencyKey] = useState<string>(() => createIdempotencyKey())
+
+  const [lookupOrderId, setLookupOrderId] = useState('')
+  const [currentOrder, setCurrentOrder] = useState<RazorpayOrderResult | null>(null)
+  const [orderStatus, setOrderStatus] = useState<RazorpayOrderStatusResult | null>(null)
+  const [verifyResult, setVerifyResult] = useState<RazorpayVerifyResult | null>(null)
+  const [recentOrders, setRecentOrders] = useState<RazorpayOrderStatusResult[]>([])
+
+  const [lifecycle, setLifecycle] = useState<RazorpayCheckoutLifecycle>('idle')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [statusMsg, setStatusMsg] = useState('')
+
+  const [manualPaymentId, setManualPaymentId] = useState('')
+  const [manualSignature, setManualSignature] = useState('')
+
+  const fetchValidatedConfig = useCallback(async (): Promise<RazorpayConfigResult> => {
+    const cfg = await razorpayApi.getConfig(token)
+    validateRazorpayTestKey(cfg.key_id)
+    return cfg
+  }, [token])
+
+  const applyConfigSuccess = useCallback((cfg: RazorpayConfigResult) => {
+    setConfigError('')
+    setConfig(cfg)
+    setConfigState('ready')
+    onStatusChange?.('ready')
+  }, [onStatusChange])
+
+  const applyConfigError = useCallback((err: unknown) => {
+    setConfig(null)
+    setConfigState('unavailable')
+    onStatusChange?.('unavailable')
+    if (err instanceof AccountError || err instanceof AdminApiError) {
+      setConfigError(err.message)
+    } else {
+      setConfigError('Razorpay Test Mode sandbox is unavailable.')
+    }
+  }, [onStatusChange])
+
+  const refreshConfig = useCallback(async () => {
+    setConfigState('checking')
+    onStatusChange?.('checking')
+    setConfigError('')
+    try {
+      const cfg = await fetchValidatedConfig()
+      applyConfigSuccess(cfg)
+    } catch (err) {
+      applyConfigError(err)
+    }
+  }, [fetchValidatedConfig, applyConfigSuccess, applyConfigError, onStatusChange])
+
+  useEffect(() => {
+    let active = true
+    void fetchValidatedConfig().then(
+      (cfg) => {
+        if (active) applyConfigSuccess(cfg)
+      },
+      (err: unknown) => {
+        if (active) applyConfigError(err)
+      },
+    )
+    return () => { active = false }
+  }, [fetchValidatedConfig, applyConfigSuccess, applyConfigError])
+
+  const amountPaise = toPaise(amount)
+
+  const recordOrderHistory = useCallback((snapshot: RazorpayOrderStatusResult) => {
+    setRecentOrders((prev) => {
+      const filtered = prev.filter((item) => item.razorpay_order_id !== snapshot.razorpay_order_id)
+      return [snapshot, ...filtered].slice(0, 5)
+    })
+  }, [])
+
+  const inspectOrder = useCallback(async (targetOrderId: string) => {
+    const trimmed = targetOrderId.trim()
+    if (!trimmed) return
+    setErrorMsg('')
+    try {
+      const status = await razorpayApi.getOrderStatus(token, trimmed)
+      setOrderStatus(status)
+      setLookupOrderId(status.razorpay_order_id)
+      recordOrderHistory(status)
+      return status
+    } catch (err) {
+      const message = err instanceof AccountError || err instanceof AdminApiError
+        ? err.message
+        : 'Could not retrieve Razorpay order status.'
+      setErrorMsg(message)
+      return undefined
+    }
+  }, [token, recordOrderHistory])
+
+  const submitVerification = useCallback(async (payload: {
+    razorpay_order_id: string
+    razorpay_payment_id: string
+    razorpay_signature: string
+  }) => {
+    setLifecycle('verifying')
+    setErrorMsg('')
+    setStatusMsg('Verifying HMAC signature and reconciling with Razorpay provider...')
+    try {
+      const verified = await razorpayApi.verifyPayment(token, payload)
+      if (!verified.verified || !verified.reconciled_with_provider) {
+        setVerifyResult(null)
+        setLifecycle('failed')
+        setErrorMsg('Backend verification returned unverified status. Payment is not complete.')
+        setStatusMsg('')
+        return
+      }
+      setVerifyResult(verified)
+      setLifecycle('verified')
+      setStatusMsg('Signature verified via backend HMAC and reconciled with Razorpay Test Mode.')
+      await inspectOrder(verified.razorpay_order_id)
+    } catch (err) {
+      setVerifyResult(null)
+      setLifecycle('failed')
+      setStatusMsg('')
+      setErrorMsg(
+        err instanceof AccountError || err instanceof AdminApiError
+          ? err.message
+          : 'Backend HMAC signature verification failed.',
+      )
+    }
+  }, [token, inspectOrder])
+
+  async function handleCreateOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (configState !== 'ready' || !config) return
+    if (amountPaise === null) {
+      setErrorMsg('Enter a valid positive INR amount (e.g., 500.00) before creating a test order.')
+      return
+    }
+    setLifecycle('creating')
+    setErrorMsg('')
+    setStatusMsg('Creating isolated Razorpay Test Mode order...')
+    setVerifyResult(null)
+    try {
+      const created = await razorpayApi.createOrder(token, amountPaise, {
+        receipt: receipt.trim() || undefined,
+        notes: notesPurpose.trim()
+          ? { purpose: notesPurpose.trim(), admin_id: accountId, sandbox_mode: 'test_only' }
+          : { admin_id: accountId, sandbox_mode: 'test_only' },
+        idempotencyKey: orderIdempotencyKey,
+      })
+      validateRazorpayTestKey(created.key_id)
+      setCurrentOrder(created)
+      setLookupOrderId(created.razorpay_order_id)
+      setOrderStatus({
+        id: created.id,
+        razorpay_order_id: created.razorpay_order_id,
+        amount_paise: created.amount_paise,
+        currency: created.currency,
+        status: created.status,
+        receipt: created.receipt,
+        key_id: created.key_id,
+        created_at: created.created_at,
+        payments: [],
+      })
+      recordOrderHistory({
+        id: created.id,
+        razorpay_order_id: created.razorpay_order_id,
+        amount_paise: created.amount_paise,
+        currency: created.currency,
+        status: created.status,
+        receipt: created.receipt,
+        key_id: created.key_id,
+        created_at: created.created_at,
+        payments: [],
+      })
+      setOrderIdempotencyKey(createIdempotencyKey())
+      setLifecycle('ready_for_checkout')
+      setStatusMsg('Test order created on backend. Launch Razorpay Test Checkout to continue.')
+    } catch (err) {
+      setLifecycle('failed')
+      setStatusMsg('')
+      setErrorMsg(
+        err instanceof AccountError || err instanceof AdminApiError
+          ? err.message
+          : 'Could not create Razorpay test order.',
+      )
+    }
+  }
+
+  async function openCheckout() {
+    if (configState !== 'ready' || !currentOrder || !config) return
+    let activeKey: string
+    try {
+      activeKey = validateRazorpayTestKey(currentOrder.key_id || config.key_id)
+    } catch (err) {
+      setLifecycle('failed')
+      setErrorMsg(err instanceof AdminApiError ? err.message : 'Invalid Razorpay test key.')
+      return
+    }
+
+    setLifecycle('opening_checkout')
+    setErrorMsg('')
+    setStatusMsg('Loading Razorpay Test Checkout SDK...')
+    try {
+      await loadRazorpayCheckoutScript()
+      const win = window as unknown as { Razorpay?: RazorpayCheckoutCtor }
+      if (typeof win.Razorpay !== 'function') {
+        throw new AdminApiError('Razorpay Checkout constructor unavailable after script load.')
+      }
+
+      const instance = new win.Razorpay({
+        key: activeKey,
+        amount: currentOrder.amount_paise,
+        currency: currentOrder.currency,
+        name: 'PauseGuard Merchant Sandbox',
+        description: 'TEST ONLY · Isolated from P2P UPI Ledger',
+        order_id: currentOrder.razorpay_order_id,
+        notes: {
+          purpose: notesPurpose.trim() || 'merchant_checkout_test',
+          sandbox_mode: 'test_only',
+        },
+        theme: { color: '#10b981' },
+        modal: {
+          ondismiss: () => {
+            setLifecycle('cancelled')
+            setStatusMsg('Checkout dismissed before completion. Backend order remains unverified.')
+          },
+        },
+        handler: async (callbackPayload: RazorpayCheckoutSuccessPayload) => {
+          setStatusMsg('Checkout callback received. Forwarding signature to backend...')
+          await submitVerification({
+            razorpay_order_id: callbackPayload.razorpay_order_id || currentOrder.razorpay_order_id,
+            razorpay_payment_id: callbackPayload.razorpay_payment_id,
+            razorpay_signature: callbackPayload.razorpay_signature,
+          })
+        },
+      })
+
+      instance.on?.('payment.failed', (failureEvent) => {
+        const desc = failureEvent?.error?.description || failureEvent?.error?.reason || 'Razorpay Test Checkout reported payment failure.'
+        setLifecycle('failed')
+        setStatusMsg('')
+        setErrorMsg(`Checkout failed: ${desc}`)
+      })
+
+      setStatusMsg('Razorpay Test Checkout opened. Complete or dismiss the modal to proceed.')
+      instance.open()
+    } catch (err) {
+      setLifecycle('failed')
+      setStatusMsg('')
+      setErrorMsg(
+        err instanceof AdminApiError || err instanceof AccountError
+          ? err.message
+          : 'Could not launch Razorpay Test Checkout.',
+      )
+    }
+  }
+
+  async function handleManualVerify(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!currentOrder) return
+    if (!manualPaymentId.trim() || !manualSignature.trim()) {
+      setErrorMsg('Enter both razorpay_payment_id and 64-character HMAC signature to verify.')
+      return
+    }
+    await submitVerification({
+      razorpay_order_id: currentOrder.razorpay_order_id,
+      razorpay_payment_id: manualPaymentId.trim(),
+      razorpay_signature: manualSignature.trim(),
+    })
+  }
+
+  const busy = lifecycle === 'creating' || lifecycle === 'opening_checkout' || lifecycle === 'verifying'
+  const effectiveStatus = orderStatus?.status ?? verifyResult?.status ?? currentOrder?.status ?? 'not_created'
+  const verifiedBadge = verifyResult?.verified && verifyResult?.reconciled_with_provider
+
   return (
     <div className="admin-mode-panel">
+      {/* Status Banner */}
       <div className="admin-razorpay-unavailable">
         <div className="admin-section-label">
-          <span className="pill caution"><Icon name="alertTriangle" size={13} /> TEST ONLY · Backend Not Available</span>
-          <span className="pill neutral">SANDBOX / DISABLED</span>
+          {configState === 'ready' ? (
+            <>
+              <span className="pill mint"><Icon name="checkCircle" size={13} /> TEST ONLY · Sandbox Active</span>
+              <span className="pill neutral">ISOLATED MERCHANT FLOW · NO P2P LEDGER MUTATION</span>
+            </>
+          ) : configState === 'checking' ? (
+            <span className="pill neutral"><Icon name="clock" size={13} /> TEST ONLY · Checking backend config…</span>
+          ) : (
+            <>
+              <span className="pill caution"><Icon name="alertTriangle" size={13} /> TEST ONLY · Backend Disabled / Unavailable</span>
+              <span className="pill neutral">FAIL-CLOSED</span>
+            </>
+          )}
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => void refreshConfig()}
+            disabled={configState === 'checking' || busy}
+          >
+            Refresh status
+          </button>
         </div>
         <p className="admin-mode-desc">
-          Razorpay Test Mode requires Komal's FastAPI backend endpoints for order creation and HMAC signature verification.
-          Checkout remains disabled until backend integration is completed. No real money is transferred.
+          Admin-only Razorpay Test Mode merchant sandbox. Uses backend-supplied <code>rzp_test_*</code> keys only,
+          verifies HMAC-SHA256 signatures server-side, and never authorizes or modifies PauseGuard Mock UPI transfers.
         </p>
+        {configError && (
+          <div className="notice" role="alert">
+            <span>{configError}</span>
+          </div>
+        )}
       </div>
 
-      {/* Disabled checkout & reconciliation preview */}
+      {/* Order Creation Form */}
+      <form className="card" onSubmit={handleCreateOrder}>
+        <div className="card-header">
+          <div className="symbol"><Icon name="zap" /></div>
+          <div className="grow">
+            <p className="eyebrow">Step 1 · Server-side merchant order</p>
+            <h2>Create Razorpay Test Order</h2>
+          </div>
+          <span className="pill neutral">Admin: {accountId}</span>
+        </div>
+
+        <div className="form-fields" style={{ marginTop: '.75rem' }}>
+          <label className="field">
+            <span>Amount (INR)</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => {
+                setAmount(e.target.value)
+                setOrderIdempotencyKey(createIdempotencyKey())
+              }}
+              placeholder="500.00"
+              disabled={configState !== 'ready' || busy}
+            />
+            <small className="form-note">
+              Integer amount_paise: {amountPaise !== null ? `${amountPaise.toLocaleString('en-IN')} paise` : 'Invalid amount'}
+            </small>
+          </label>
+
+          <label className="field">
+            <span>Receipt reference (optional)</span>
+            <input
+              type="text"
+              value={receipt}
+              onChange={(e) => {
+                setReceipt(e.target.value)
+                setOrderIdempotencyKey(createIdempotencyKey())
+              }}
+              placeholder="rcpt_admin_test_001"
+              maxLength={128}
+              disabled={configState !== 'ready' || busy}
+            />
+          </label>
+
+          <label className="field">
+            <span>Merchant test note</span>
+            <input
+              type="text"
+              value={notesPurpose}
+              onChange={(e) => {
+                setNotesPurpose(e.target.value)
+                setOrderIdempotencyKey(createIdempotencyKey())
+              }}
+              placeholder="merchant_checkout_test"
+              disabled={configState !== 'ready' || busy}
+            />
+          </label>
+        </div>
+
+        <div className="actions" style={{ marginTop: '1rem' }}>
+          <button
+            className="primary"
+            type="submit"
+            disabled={configState !== 'ready' || amountPaise === null || busy}
+          >
+            <Icon name="zap" size={16} />
+            {lifecycle === 'creating' ? 'Creating order…' : 'Create Test Order'}
+          </button>
+          <span className="form-note">
+            Idempotency key: <code>{orderIdempotencyKey}</code>
+          </span>
+        </div>
+      </form>
+
+      {/* Active Order Checkout & Server Verification */}
       <div className="card admin-razorpay-preview">
         <div className="card-header">
-          <div className="symbol caution"><Icon name="zap" /></div>
+          <div className={`symbol ${verifiedBadge ? 'mint' : 'caution'}`}>
+            <Icon name={verifiedBadge ? 'shieldCheck' : 'lock'} />
+          </div>
           <div className="grow">
-            <p className="eyebrow">Sandbox checkout preview · TEST ONLY</p>
+            <p className="eyebrow">Step 2 &amp; 3 · Checkout &amp; server HMAC reconciliation</p>
             <h2>Razorpay Merchant Test Checkout</h2>
           </div>
-          <span className="pill caution">DISABLED</span>
+          {verifiedBadge ? (
+            <span className="pill mint">Verified &amp; Reconciled</span>
+          ) : currentOrder ? (
+            <span className="pill caution">{effectiveStatus.toUpperCase()}</span>
+          ) : (
+            <span className="pill neutral">No active order</span>
+          )}
         </div>
 
         <dl className="payment-details admin-razorpay-fields">
           <div>
             <dt>Razorpay Order ID</dt>
-            <dd>— (pending backend)</dd>
+            <dd><code>{currentOrder?.razorpay_order_id ?? '— (create order first)'}</code></dd>
           </div>
           <div>
             <dt>Razorpay Payment ID</dt>
-            <dd>— (pending callback)</dd>
+            <dd><code>{verifyResult?.razorpay_payment_id ?? orderStatus?.payments?.[0]?.id ?? '— (pending callback)'}</code></dd>
           </div>
           <div>
             <dt>Amount &amp; Currency</dt>
-            <dd>₹0.00 · INR (0 paise)</dd>
+            <dd>
+              {currentOrder
+                ? `${formatRupees(currentOrder.amount_paise)} · ${currentOrder.currency} (${currentOrder.amount_paise} paise)`
+                : '₹0.00 · INR (0 paise)'}
+            </dd>
           </div>
           <div>
             <dt>Signature Verification</dt>
-            <dd>Server-side HMAC required</dd>
+            <dd>
+              {verifiedBadge
+                ? 'Verified (HMAC-SHA256 & Reconciled)'
+                : lifecycle === 'failed'
+                  ? 'Verification failed / unverified'
+                  : 'Server-side HMAC required'}
+            </dd>
           </div>
           <div>
             <dt>Reconciliation Status</dt>
-            <dd>Unavailable</dd>
+            <dd>{orderStatus ? `${orderStatus.status} (${orderStatus.payments.length} payment record${orderStatus.payments.length === 1 ? '' : 's'})` : 'Pending'}</dd>
           </div>
           <div>
             <dt>Public Test Key</dt>
-            <dd>Not configured</dd>
+            <dd><code>{currentOrder?.key_id ?? config?.key_id ?? 'Unavailable'}</code></dd>
           </div>
         </dl>
 
-        <div className="actions">
+        {statusMsg && (
+          <div className="admin-hash-status" role="status" style={{ marginTop: '.75rem' }}>
+            <span className={`pill ${verifiedBadge ? 'mint' : 'neutral'}`}>
+              <Icon name={verifiedBadge ? 'checkCircle' : 'info'} size={13} />
+              {verifiedBadge ? 'Verified' : 'Status'}
+            </span>
+            <span className="field-help">{statusMsg}</span>
+          </div>
+        )}
+
+        {errorMsg && (
+          <div className="notice" role="alert">
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        <div className="actions" style={{ marginTop: '1rem' }}>
           <button
-            className="primary admin-disabled-btn"
+            className="primary"
             type="button"
-            disabled
-            aria-disabled="true"
+            disabled={configState !== 'ready' || !currentOrder || busy}
+            onClick={() => void openCheckout()}
           >
-            <Icon name="lock" size={16} /> Open Razorpay Test Checkout (Disabled)
+            <Icon name="external" size={16} />
+            {lifecycle === 'opening_checkout'
+              ? 'Opening Checkout…'
+              : lifecycle === 'verifying'
+                ? 'Verifying Signature…'
+                : 'Open Razorpay Test Checkout'}
           </button>
-          <span className="pill neutral">Awaiting FastAPI backend</span>
+
+          {currentOrder && (
+            <button
+              className="secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => void inspectOrder(currentOrder.razorpay_order_id)}
+            >
+              Refresh Order Status
+            </button>
+          )}
         </div>
 
-        <p className="form-note">
-          Security invariant: checkout can never mark a payment complete from client-side callbacks alone.
-          <code>key_secret</code> stays strictly on the backend.
+        <details style={{ marginTop: '1rem' }}>
+          <summary style={{ cursor: 'pointer', fontSize: '.9rem', color: 'var(--muted)' }}>
+            Server HMAC Verification &amp; Signature Diagnostic (for offline / negative tests)
+          </summary>
+          <form onSubmit={handleManualVerify} className="form-fields" style={{ marginTop: '.75rem' }}>
+            <label className="field">
+              <span>Razorpay Payment ID</span>
+              <input
+                type="text"
+                value={manualPaymentId}
+                onChange={(e) => setManualPaymentId(e.target.value)}
+                placeholder="pay_test_..."
+                disabled={!currentOrder || busy}
+              />
+            </label>
+            <label className="field">
+              <span>HMAC-SHA256 Signature (64 hex chars)</span>
+              <input
+                type="text"
+                value={manualSignature}
+                onChange={(e) => setManualSignature(e.target.value)}
+                placeholder="64-character signature from backend/checkout"
+                disabled={!currentOrder || busy}
+              />
+            </label>
+            <div className="actions" style={{ alignSelf: 'end' }}>
+              <button className="secondary" type="submit" disabled={!currentOrder || busy}>
+                Verify Signature on Backend
+              </button>
+            </div>
+          </form>
+        </details>
+
+        <p className="form-note" style={{ marginTop: '.75rem' }}>
+          Security invariant: checkout never marks a payment verified from client-side callbacks alone.
+          <code>key_secret</code> stays strictly on the FastAPI backend, and PauseGuard P2P/UPI state cannot be altered here.
         </p>
       </div>
 
-      {/* Required backend endpoints */}
+      {/* Order Lookup & History */}
+      <div className="card">
+        <div className="card-header">
+          <div className="symbol"><Icon name="activity" /></div>
+          <div className="grow">
+            <p className="eyebrow">Order inspection &amp; history</p>
+            <h2>Stored Merchant Order &amp; Payments</h2>
+          </div>
+        </div>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void inspectOrder(lookupOrderId)
+          }}
+          className="actions"
+          style={{ marginTop: '.75rem' }}
+        >
+          <input
+            type="text"
+            aria-label="Inspect Razorpay order ID"
+            value={lookupOrderId}
+            onChange={(e) => setLookupOrderId(e.target.value)}
+            placeholder="order_... or rzp_ord_..."
+            style={{ flex: '1 1 16rem' }}
+          />
+          <button className="secondary" type="submit" disabled={!lookupOrderId.trim() || busy}>
+            Fetch Order Status
+          </button>
+        </form>
+
+        {orderStatus && (
+          <div style={{ marginTop: '1rem' }}>
+            <p className="form-note">
+              Order <code>{orderStatus.razorpay_order_id}</code> ({orderStatus.id}) · Status:{' '}
+              <strong>{orderStatus.status}</strong> · {formatRupees(orderStatus.amount_paise)}
+            </p>
+            {orderStatus.payments.length === 0 ? (
+              <p className="form-note" style={{ marginTop: '.35rem' }}>No captured payment records on this order yet.</p>
+            ) : (
+              <ul className="admin-recent-list" style={{ marginTop: '.5rem' }}>
+                {orderStatus.payments.map((pay) => (
+                  <li key={pay.id} className="admin-recent-item">
+                    <div>
+                      <code>{pay.id}</code>
+                      <span>{pay.method ? `Method: ${pay.method}` : 'Method: sandbox'}</span>
+                    </div>
+                    <span className={`pill ${pay.status === 'captured' ? 'mint' : 'neutral'}`}>{pay.status}</span>
+                    <span>{formatRupees(pay.amount_paise)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {recentOrders.length > 0 && (
+          <div style={{ marginTop: '1rem' }}>
+            <p className="eyebrow">Session order history</p>
+            <ul className="admin-recent-list" style={{ marginTop: '.4rem' }}>
+              {recentOrders.map((ord) => (
+                <li key={ord.razorpay_order_id} className="admin-recent-item">
+                  <div>
+                    <code>{ord.razorpay_order_id}</code>
+                    <span>{formatRupees(ord.amount_paise)} · {ord.currency}</span>
+                  </div>
+                  <span className={`pill ${ord.status === 'paid' ? 'mint' : 'neutral'}`}>{ord.status}</span>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => void inspectOrder(ord.razorpay_order_id)}
+                  >
+                    Inspect
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* Canonical backend endpoints */}
       <div className="card admin-endpoints-card">
         <div className="card-header">
           <div className="symbol"><Icon name="fileText" /></div>
-          <div>
-            <p className="eyebrow">Backend dependencies (Komal)</p>
-            <h2>Required FastAPI Endpoints</h2>
+          <div className="grow">
+            <p className="eyebrow">Backend contract</p>
+            <h2>Canonical FastAPI Sandbox Endpoints</h2>
           </div>
+          <span className={`pill ${configState === 'ready' ? 'mint' : 'caution'}`}>
+            {configState === 'ready' ? 'Connected' : configState === 'checking' ? 'Checking' : 'Unavailable'}
+          </span>
         </div>
         <ul className="admin-endpoint-list">
           {razorpayRequiredEndpoints.map((ep) => (
@@ -630,6 +1226,11 @@ export function Admin({ token, accountId }: {
   accountId: string
 }) {
   const [mode, setMode] = useState<AdminTestMode>('mock-upi')
+  const [razorpayTabState, setRazorpayTabState] = useState<'checking' | 'ready' | 'unavailable'>('checking')
+
+  const handleRazorpayStatusChange = useCallback((next: 'checking' | 'ready' | 'unavailable') => {
+    setRazorpayTabState(next)
+  }, [])
 
   return (
     <div className="admin-dashboard">
@@ -637,7 +1238,7 @@ export function Admin({ token, accountId }: {
         <div className="admin-header-copy">
           <p className="eyebrow"><span className="line" /> Admin testing workspace</p>
           <h1>Payment Testing <em>Dashboard</em></h1>
-          <p>Isolated sandbox to verify Mock UPI interventions and inspect planned Razorpay test checkout contracts.</p>
+          <p>Isolated sandbox to verify Mock UPI interventions and execute admin-only Razorpay Test Mode checkouts.</p>
         </div>
         <div className="admin-header-badges">
           <span className="pill neutral"><Icon name="shield" size={13} /> Admin Role Enforced</span>
@@ -670,7 +1271,13 @@ export function Admin({ token, accountId }: {
         >
           <Icon name="zap" size={16} />
           <span>Mode B — Razorpay Test Mode</span>
-          <span className="pill caution">TEST ONLY · Disabled</span>
+          <span className={`pill ${razorpayTabState === 'ready' ? 'mint' : 'caution'}`}>
+            {razorpayTabState === 'ready'
+              ? 'TEST ONLY · Active'
+              : razorpayTabState === 'unavailable'
+                ? 'TEST ONLY · Unavailable'
+                : 'TEST ONLY'}
+          </span>
         </button>
       </div>
 
@@ -682,7 +1289,7 @@ export function Admin({ token, accountId }: {
       >
         {mode === 'mock-upi'
           ? <MockUpiPanel token={token} accountId={accountId} />
-          : <RazorpayPanel />}
+          : <RazorpayPanel token={token} accountId={accountId} onStatusChange={handleRazorpayStatusChange} />}
       </div>
     </div>
   )

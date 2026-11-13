@@ -1,6 +1,7 @@
 """FastAPI router for Razorpay Test Mode merchant sandbox operations.
 
 Endpoints:
+- GET  /api/v2/sandbox/razorpay/config: Return non-secret Test Mode public key_id when enabled (Admin only).
 - POST /api/v2/sandbox/razorpay/orders: Create a Razorpay Test Mode merchant order (Admin only).
 - POST /api/v2/sandbox/razorpay/verify: Verify checkout payment signature and reconcile with provider (Admin only).
 - POST /api/v2/sandbox/razorpay/webhook: Inbound Razorpay webhook receiver with HMAC signature verification and replay protection.
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_actor
 from app.auth.schemas import (
+    RazorpayConfigResponse,
     RazorpayOrderCreateRequest,
     RazorpayOrderResponse,
     RazorpayVerifyRequest,
@@ -53,6 +55,19 @@ def get_razorpay_merchant_service(
             session.close()
     else:
         yield get_razorpay_service()
+
+
+@router.get(
+    "/config",
+    response_model=RazorpayConfigResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_config(
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    service: Annotated[RazorpayMerchantService, Depends(get_razorpay_merchant_service)],
+) -> RazorpayConfigResponse:
+    """Return validated public Razorpay Test Mode configuration (Admin only, never secrets)."""
+    return service.get_public_config(actor)
 
 
 @router.post(
