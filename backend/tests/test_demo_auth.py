@@ -84,7 +84,7 @@ def test_payer_demo_session_creation_and_profile_resolution(client: TestClient):
     assert response.status_code == 200
     data = response.json()
 
-    assert data["token"] == "demo-token-payer"
+    assert data["token"].startswith("demo-session-payer-")
     assert data["token_type"] == "Bearer"
     assert data["user_id"] == str(SYNTHETIC_PAYER_ID)
     assert data["role"] == "payer"
@@ -122,7 +122,7 @@ def test_guardian_demo_session_creation(client: TestClient):
     assert response.status_code == 200
     data = response.json()
 
-    assert data["token"] == "demo-token-guardian"
+    assert data["token"].startswith("demo-session-guardian-")
     assert data["token_type"] == "Bearer"
     assert data["user_id"] == str(SYNTHETIC_GUARDIAN_ID)
     assert data["role"] == "guardian"
@@ -269,7 +269,7 @@ def test_admin_privilege_allowed_only_when_explicitly_configured():
         resp = tc.post("/api/v2/demo/session", json={"role": "admin"})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["token"] == "demo-token-admin"
+        assert data["token"].startswith("demo-session-admin-")
         assert data["user_id"] == str(SYNTHETIC_ADMIN_ID)
         assert data["role"] == "admin"
 
@@ -383,3 +383,99 @@ def test_real_app_factory_demo_session():
         profile_resp = tc.get("/api/v2/profile", headers={"Authorization": f"Bearer {token}"})
         assert profile_resp.status_code == 200
         assert profile_resp.json()["user_id"] == str(SYNTHETIC_PAYER_ID)
+
+
+# ---------------------------------------------------------------------------
+# 14. Session Expiration Enforcement
+# ---------------------------------------------------------------------------
+
+def test_session_expiration_fail_closed_enforcement(client: TestClient):
+    """Verify that sessions strictly expire and fail closed with 401."""
+    import time
+    from app.auth.identities import DEMO_SESSION_STORE, resolve_synthetic_token
+
+    # 1. Create a session with 1 second lifespan
+    resp = client.post("/api/v2/demo/session", json={"role": "payer", "expires_in_seconds": 1})
+    assert resp.status_code == 200
+    token = resp.json()["token"]
+    assert resp.json()["expires_in_seconds"] == 1
+
+    # 2. Token is immediately valid
+    profile_resp = client.get("/api/v2/profile", headers={"Authorization": f"Bearer {token}"})
+    assert profile_resp.status_code == 200
+
+    # 3. Simulate passage of time beyond expiration via now_ms on resolver
+    record = DEMO_SESSION_STORE.get_session(token)
+    assert record is not None
+    expired_time = record.expires_at_ms + 1000
+
+    # Resolver rejects expired session
+    settings = Settings(environment="test", mode="mock", allow_demo_auth=True)
+    assert resolve_synthetic_token(token, settings=settings, now_ms=expired_time) is None
+
+    # Wait 1.1 seconds for real wall-clock expiry
+    time.sleep(1.1)
+
+    # Subsequent request fails closed with HTTP 401
+    expired_resp = client.get("/api/v2/profile", headers={"Authorization": f"Bearer {token}"})
+    assert expired_resp.status_code == 401
+    assert "Invalid, expired, or unrecognized" in expired_resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 15. Session Logout / Revocation
+# ---------------------------------------------------------------------------
+
+def test_session_logout_revocation(client: TestClient):
+    """Verify DELETE /api/v2/demo/session purges the session token."""
+    resp = client.post("/api/v2/demo/session", json={"role": "payer"})
+    assert resp.status_code == 200
+    token = resp.json()["token"]
+
+    # Valid before logout
+    assert client.get("/api/v2/profile", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+    # Logout
+    logout_resp = client.delete("/api/v2/demo/session", headers={"Authorization": f"Bearer {token}"})
+    assert logout_resp.status_code == 200
+    assert logout_resp.json()["signed_out"] is True
+
+    # Request after logout fails with 401
+    after_resp = client.get("/api/v2/profile", headers={"Authorization": f"Bearer {token}"})
+    assert after_resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 16. Static Tokens Preserved for Offline Unit Tests
+# ---------------------------------------------------------------------------
+
+def test_static_fixture_tokens_remain_valid(client: TestClient):
+    """Existing static tokens like demo-token-payer remain functional for offline test suites."""
+    resp = client.get("/api/v2/profile", headers={"Authorization": "Bearer demo-token-payer"})
+    assert resp.status_code == 200
+    assert resp.json()["user_id"] == str(SYNTHETIC_PAYER_ID)
+
+    resp_guardian = client.get("/api/v2/profile", headers={"Authorization": "Bearer demo-token-guardian"})
+    assert resp_guardian.status_code == 200
+    assert resp_guardian.json()["user_id"] == str(SYNTHETIC_GUARDIAN_ID)
+
+
+# ---------------------------------------------------------------------------
+# 17. WebSocket Closes on Expired Token
+# ---------------------------------------------------------------------------
+
+def test_websocket_closes_on_expired_session(client: TestClient):
+    """WebSocket connection fails when using an expired session token."""
+    import time
+
+    # Create short-lived session
+    resp = client.post("/api/v2/demo/session", json={"role": "payer", "expires_in_seconds": 1})
+    token = resp.json()["token"]
+
+    # Sleep past expiration
+    time.sleep(1.1)
+
+    # WebSocket connection should be rejected / closed
+    with pytest.raises(Exception):
+        with client.websocket_connect(f"/api/v2/ws?token={token}") as ws:
+            ws.receive_json()

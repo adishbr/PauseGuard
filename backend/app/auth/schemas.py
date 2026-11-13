@@ -506,6 +506,12 @@ class DemoSessionRequest(BaseModel):
     contact: str | None = Field(None, max_length=128, description="Optional synthetic demo contact matching authorized identities")
     sample: bool | None = Field(None, description="Optional flag for standard sample demo identity")
     identity_tag: str | None = Field(None, max_length=64, description="Optional synthetic identity identifier (primary, other)")
+    expires_in_seconds: int | None = Field(
+        None,
+        ge=1,
+        le=86400,
+        description="Optional session lifespan in seconds (defaults to 1800 for 30m expiration)",
+    )
 
 
 class DemoSessionProfile(BaseModel):
@@ -544,3 +550,11 @@ class DemoSessionResponse(BaseModel):
     role: UserRole = Field(..., description="Primary server-resolved role")
     roles: list[UserRole] = Field(..., description="Active server-persisted roles")
     profile: DemoSessionProfile = Field(..., description="Synthetic demo profile metadata")
+
+
+class DemoSessionLogoutResponse(BaseModel):
+    """Confirmation that a local prototype demo session was terminated."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signed_out: bool = Field(True, description="Confirmation that the demo session was revoked")

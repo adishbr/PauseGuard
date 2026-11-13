@@ -12,8 +12,10 @@ SECURITY CONTROLS:
 """
 
 from collections.abc import Mapping
+import threading
+import time
 from types import MappingProxyType
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.config import Settings, load_settings
 from app.models.roles import UserRole
@@ -135,18 +137,33 @@ def resolve_synthetic_token(
     token: str,
     *,
     settings: Settings | None = None,
+    now_ms: int | None = None,
 ) -> TrustedActorContext | None:
-    """Resolve a bearer token string to a TrustedActorContext if present in demo registry.
+    """Resolve a bearer token string to a TrustedActorContext.
 
-    Fails closed if demo mode is not permitted in the active settings environment.
-    Client-supplied roles and metadata are never inspected here; only the
-    server-persisted synthetic context mapping is returned.
+    Resolution Order:
+    1. Fail closed if demo mode is not permitted in the active settings environment.
+    2. Check dynamic DemoSessionStore: enforces strict 30m session expiration.
+       Expired sessions return None (resulting in HTTP 401).
+    3. Check static DEMO_TOKEN_REGISTRY: preserves approved synthetic test behavior
+       for offline unit tests using static fixture tokens.
     """
     if not isinstance(token, str):
         return None
     if not is_demo_mode_allowed(settings):
         return None
-    return DEMO_TOKEN_REGISTRY.get(token.strip())
+
+    cleaned = token.strip()
+    if not cleaned:
+        return None
+
+    # 1. Dynamic demo session store with strict fail-closed expiration check
+    session = DEMO_SESSION_STORE.get_session(cleaned, now_ms=now_ms)
+    if session is not None:
+        return session.actor
+
+    # 2. Static approved demo tokens for offline test suites
+    return DEMO_TOKEN_REGISTRY.get(cleaned)
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +237,118 @@ SYNTHETIC_DEMO_IDENTITIES: tuple[SyntheticDemoIdentity, ...] = (
         is_admin=True,
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Local Demo Session Store & Expiration Management
+# ---------------------------------------------------------------------------
+
+class DemoSessionRecord:
+    """Server-side record of an active or expired local prototype demo session."""
+
+    __slots__ = (
+        "session_id",
+        "token",
+        "user_id",
+        "role",
+        "actor",
+        "identity",
+        "created_at_ms",
+        "expires_at_ms",
+    )
+
+    def __init__(
+        self,
+        session_id: str,
+        token: str,
+        user_id: UUID,
+        role: UserRole,
+        actor: TrustedActorContext,
+        identity: SyntheticDemoIdentity,
+        created_at_ms: int,
+        expires_at_ms: int,
+    ) -> None:
+        self.session_id = session_id
+        self.token = token
+        self.user_id = user_id
+        self.role = role
+        self.actor = actor
+        self.identity = identity
+        self.created_at_ms = created_at_ms
+        self.expires_at_ms = expires_at_ms
+
+    def is_expired(self, now_ms: int | None = None) -> bool:
+        current = int(time.time() * 1000) if now_ms is None else now_ms
+        return current >= self.expires_at_ms
+
+
+class DemoSessionStore:
+    """Thread-safe, fail-closed in-memory session registry for local prototype demo sessions.
+
+    SECURITY INVARIANTS:
+    1. Ephemeral: In-memory only; cleared on process restart.
+    2. Fail-closed expiration: Sessions expire strictly after lifespan (default 1800s / 30m).
+    3. Revocable: Explicit deletion on logout / session termination.
+    4. Deterministic identity: Bound strictly to server-managed SyntheticDemoIdentity.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sessions: dict[str, DemoSessionRecord] = {}
+
+    def create_session(
+        self,
+        identity: SyntheticDemoIdentity,
+        role: UserRole,
+        expires_in_seconds: int = 1800,
+        now_ms: int | None = None,
+    ) -> DemoSessionRecord:
+        current_time = int(time.time() * 1000) if now_ms is None else now_ms
+        expires_at = current_time + (expires_in_seconds * 1000)
+        session_id = f"pg_demo_{uuid4().hex[:16]}"
+        role_tag = role.value.lower()
+        token = f"demo-session-{role_tag}-{uuid4().hex[:12]}"
+
+        record = DemoSessionRecord(
+            session_id=session_id,
+            token=token,
+            user_id=identity.actor.user_id,
+            role=role,
+            actor=identity.actor,
+            identity=identity,
+            created_at_ms=current_time,
+            expires_at_ms=expires_at,
+        )
+        with self._lock:
+            self._sessions[token] = record
+        return record
+
+    def get_session(self, token: str, now_ms: int | None = None) -> DemoSessionRecord | None:
+        if not isinstance(token, str):
+            return None
+        cleaned = token.strip()
+        with self._lock:
+            record = self._sessions.get(cleaned)
+            if record is None:
+                return None
+            if record.is_expired(now_ms):
+                # Fail closed: Purge expired session from registry
+                self._sessions.pop(cleaned, None)
+                return None
+            return record
+
+    def revoke_session(self, token: str) -> bool:
+        if not isinstance(token, str):
+            return False
+        with self._lock:
+            return self._sessions.pop(token.strip(), None) is not None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._sessions.clear()
+
+
+DEMO_SESSION_STORE = DemoSessionStore()
 
 
 def _normalize_contact(contact: str) -> str:
