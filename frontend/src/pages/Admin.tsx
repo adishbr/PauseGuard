@@ -113,7 +113,7 @@ export function AdminLogin({ onSession, expired, registrationBlocked = false }: 
           <button className="secondary" type="button" disabled={busy} onClick={() => void trySample()}>
             Open sample admin
           </button>
-          <a className="text-button" href="/">Return to Payer app</a>
+          <a className="text-button" href="/">Return to homepage</a>
         </div>
       </form>
 

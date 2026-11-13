@@ -3,6 +3,7 @@ import { defaultReviewDuration, parseReviewDuration } from '../mocks/reviewPrefe
 import type { ReviewDuration } from '../mocks/reviewPreference.ts'
 import { ProtectionSettings } from './components/ProtectionSettings.tsx'
 import { Icon } from './components/Icon.tsx'
+import { ThemeToggle } from './components/ThemeToggle.tsx'
 import { isLocale, languages, translator } from './locales/messages.ts'
 import type { Locale } from './locales/messages.ts'
 import { Account } from './pages/Account.tsx'
@@ -10,6 +11,7 @@ import { Admin, AdminLogin } from './pages/Admin.tsx'
 import { Auth } from './pages/Auth.tsx'
 import { Enrollment } from './pages/Enrollment.tsx'
 import { Help } from './pages/Help.tsx'
+import { Landing } from './pages/Landing.tsx'
 import { accountApi, AccountError, savedSession, saveSession, sessionExpired } from './services/accountApi.ts'
 import type { DemoProfile, DemoSession } from './types/account.ts'
 import { Guardian } from './pages/Guardian.tsx'
@@ -25,9 +27,14 @@ function dashboardDestination(dashboard: string) {
     '/guardian/enrollment' : dashboard
 }
 
-function App() {
+function Workspace() {
   const [path, setPath] = useState(() => {
     const current = window.location.pathname.replace(/\/$/, '') || '/'
+    if (['/login', '/signup', '/profile', '/enrollment'].includes(current)) {
+      const canonical = '/payer' + current
+      window.history.replaceState(null, '', canonical + window.location.search)
+      return canonical
+    }
     if (current === '/admin' && !savedSession('admin')) {
       window.history.replaceState(null, '', '/admin/login')
       return '/admin/login'
@@ -37,8 +44,8 @@ function App() {
   const guardian = path === '/guardian' || path.startsWith('/guardian/')
   const adminPath = path === '/admin' || path.startsWith('/admin/')
   const role = guardian ? 'guardian' : adminPath ? 'admin' : 'payer'
-  const base = guardian ? '/guardian' : adminPath ? '/admin' : ''
-  const dashboard = base || '/'
+  const base = guardian ? '/guardian' : adminPath ? '/admin' : '/payer'
+  const dashboard = base
   const shell = path === '/analyst'
   const [token, setToken] = useState(() => shell ? '' : savedSession(role))
   const [session, setSession] = useState<DemoSession>()
@@ -58,7 +65,7 @@ function App() {
     parseReviewDuration(storageRead('localStorage', durationKey) ||
       (profile?.sample ? storageRead('localStorage', protectionKey) : '')) ?? defaultReviewDuration
   const paymentPage = path === dashboard
-  const showProtection = !guardian && !adminPath && (paymentPage || path === '/profile')
+  const showProtection = !guardian && !adminPath && (paymentPage || path === '/payer/profile')
 
   function changeLocale(next: Locale) {
     storageWrite('localStorage', languageKey, next)
@@ -99,7 +106,7 @@ function App() {
       setSession(undefined)
       setSessionError('')
       setExpired(false)
-      const destination = adminPath ? '/admin/login' : dashboard
+      const destination = base + '/login'
       window.history.replaceState(null, '', destination)
       setPath(destination)
     } catch (error) {
@@ -157,18 +164,19 @@ function App() {
   }, [locale])
 
   const authRole = guardian ? 'guardian' : 'payer'
+  const isAuth = !shell && !adminPath && !session && !token
 
   return (
-    <div className={profile?.largeText ? 'app large-text' : 'app'}>
+    <div className={`app${profile?.largeText ? ' large-text' : ''}${isAuth ? ' auth-page' : ''}`}>
       <a className="skip-link" href="#main">{t('skip')}</a>
       <header className="site-header">
         <div className="frame topbar">
           <div className="topbar-brand-group">
-            <a href={dashboard} className="brand" aria-label={guardian ? 'PauseGuard guardian home' : adminPath ? 'PauseGuard admin home' : t('payerHome')}>
+            <a href={profile ? dashboard : '/'} className="brand" aria-label={guardian ? 'PauseGuard guardian home' : adminPath ? 'PauseGuard admin home' : t('payerHome')}>
               <span className="brand-mark"><Icon name="shield" /></span>
               <span>Pause<span>Guard</span></span>
             </a>
-            <span className="platform-tag">FinTech Defense V2</span>
+            {adminPath && <span className="platform-tag">Merchant checkout testing</span>}
           </div>
 
           <div className="topbar-controls">
@@ -191,7 +199,9 @@ function App() {
               </span>
             )}
 
-            <span className="demo-badge"><span />{t('simulation')}</span>
+            {!isAuth && <span className="demo-badge"><span />{adminPath ? 'Test mode' : 'Preview'}</span>}
+
+            <ThemeToggle compact />
 
             {!adminPath && (
               <label className="locale-control">
@@ -297,28 +307,13 @@ function App() {
               <aside className="side-column" aria-label={t('about')}>
                 {showProtection && <ProtectionSettings key={session.profile.id} saved={reviewDuration} save={saveReviewDuration} t={t} />}
 
-                <section className="card side-card sync-card">
-                  <div className="symbol mint"><Icon name="users" /></div>
-                  <h2>{t('twoWindows')}</h2>
-                  <p>{t(guardian ? 'guardianGuide' : 'payerGuide')}</p>
-                  <div className="two-window-telemetry">
-                    <div className="sync-status-row">
-                      <span className="pulse-dot-small" />
-                      <span>WebSocket simulation sync active</span>
-                    </div>
-                  </div>
-                  <a className="secondary" href={guardian ? '/' : '/guardian'} target="_blank" rel="noopener">
-                    {t(guardian ? 'openPayer' : 'openGuardian')} <Icon name="external" size={18} />
-                  </a>
-                </section>
-
                 <section className="card side-card privacy-card">
                   <div className="symbol"><Icon name="lock" /></div>
                   <h2>{t('privacy')}</h2>
                   <p>{session.profile.sample ? t('privacyNote') : 'Guardian enrollment requires explicit acceptance. Payment details stay with the payer.'}</p>
                   <div className="side-card-footer">
                     <span className="pill neutral">
-                      Signed in as {session.profile.name} · {guardian ? 'Guardian' : 'Payer'} demo
+                      Signed in as {session.profile.name} · {guardian ? 'Guardian' : 'Payer'}
                     </span>
                   </div>
                 </section>
@@ -332,12 +327,17 @@ function App() {
         <div className="footer-left">
           <span><Icon name="shield" size={16} /> PauseGuard V2</span>
           <span className="footer-divider">·</span>
-          <span>COLOSSUS 3.0 FinTech Security</span>
+          <a href="/">Public homepage</a>
         </div>
         <span>{t('footer')}</span>
       </footer>
     </div>
   )
+}
+
+function App() {
+  const route = window.location.pathname.replace(/\/$/, '') || '/'
+  return route === '/' || route === '/help' ? <Landing help={route === '/help'} /> : <Workspace />
 }
 
 export default App

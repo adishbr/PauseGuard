@@ -103,7 +103,7 @@ export function Help({ payerId }: { payerId?: string }) {
                   <Icon name="copy" size={16} /> Copy demo reference
                 </button>
               </div>
-              {copied && <p role="status" className="field-help text-mint">{copied}</p>}
+              {copied && <p role="status" className="field-help text-accent">{copied}</p>}
             </div>
           ) : (
             <p className="field-help no-ref-note">Open a simulated payment in this tab to make its reference available here.</p>

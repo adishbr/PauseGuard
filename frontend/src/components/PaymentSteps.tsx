@@ -6,7 +6,7 @@ const steps: MessageKey[] = ['prepare', 'review', 'outcome']
 
 export function PaymentSteps({ current, t }: { current: 0 | 1 | 2; t: Translate }) {
   return (
-    <ol className="payment-steps" aria-label={t('journey')}>
+    <ol className="payment-steps glass-surface" aria-label={t('journey')}>
       {steps.map((step, index) => (
         <li
           key={step}

@@ -11,8 +11,8 @@ npm ci
 npm run dev
 ```
 
-1. Open the local URL shown by Vite. Choose **Open sample payer** for the pre-enrolled walkthrough or **Sign up** to create a fictional payer. In the payer's **Payment Protection Settings**, select **30 seconds**, **45 seconds**, or **60 seconds**, then choose **Save settings**. The default is 30 seconds. On a phone, the link above the payment steps jumps to the settings card.
-2. Select **Open guardian window**. Choose **Open sample guardian** for the sample walkthrough or sign in with the fictional contact that accepted the invitation. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
+1. Open the local URL shown by Vite. Choose **Log in** then **Open sample payer** for the pre-enrolled walkthrough, or **Get started** to create a fictional payer. In the payer's **Payment Protection Settings**, select **30 seconds**, **45 seconds**, or **60 seconds**, then choose **Save settings**. The default is 30 seconds. On a phone, the link above the payment steps jumps to the settings card.
+2. Open **Guardian portal** from the public homepage in a separate tab. Choose **Open sample guardian** for the sample walkthrough or sign in with the fictional contact that accepted the invitation. In the payer workspace, select **Coerced KYC transfer** and **Check payment**. In the guardian workspace, select **Open review**. In a separate browser profile, open `/guardian` and paste the request reference from the payer screen.
 3. Reject the request to stop the transfer, or approve the review to return control to the payer for a separate **Confirm simulated payment** action. If the selected review window closes first, both screens show the hold. The payer can stop the request.
 4. Try **Everyday purchase** for a routine confirmation or **Unfamiliar supplier** for a warning before confirmation. Try **Flagged recipient** for an immediate simulated safety block. These cases skip guardian review.
 
@@ -23,8 +23,8 @@ npm run dev
 - **Payer** — Sign up in two steps with a fictional name and a `.test` email or a synthetic 10-digit mobile beginning with `00000`. Choose an account category and language. Profile includes large text, business and recurring supplier preferences, a payment alert threshold, optional notifications, quiet hours, call consent and simulated Safe-Lock.
 - **Guardians** — Open **Guardians** on the payer dashboard, opt in, enter a fictional guardian and consent to sharing. Share the displayed demo link. The guardian signs in or registers with the matching fictional contact, then accepts with consent or declines in **Invitations**. Payers can revoke and guardians can withdraw enrollment. A new enrollment applies to new review requests.
 - **Review privacy** — A guardian receives an assigned active review reference and the redacted V2 response. A high-risk request without an accepted guardian goes to fallback. Revocation closes access to pending reviews, and final confirmation rechecks Safe-Lock and enrollment.
-- **Sessions** — The fixture issues 30-minute demo sessions per role and keeps fictional accounts, invitations and payments in memory until the local server restarts. The browser keeps each role's token in session storage and the review window preference in local storage by payer account. A read-only password example demonstrates the visibility control. Demo sign-in uses synthetic account selection.
-- **Other routes** — Help & recovery provides reporting links and a demo request reference. `/analyst` and `/admin` show integration shells.
+- **Sessions** — The fixture issues 30-minute demo sessions per role and keeps fictional accounts, invitations and payments in memory until the local server restarts. The browser keeps each role's token in session storage and the review window preference in local storage by payer account. Preview sign-in uses synthetic account selection.
+- **Other routes** — Help & recovery provides reporting links and a demo request reference. `/analyst` is an integration shell. `/admin` opens the existing administrator payment testing workspace.
 - **Simulation limits** — Keep the fixture local and use fictional data. Notification, quiet-hours and call controls save preferences. Delivery, contact verification, audit evidence export and identity security depend on backend integration. The existing payment interface retains four language catalogs. New account and enrollment pages use English copy.
 
 ## Phase 2 experience
@@ -75,3 +75,8 @@ Komal should define real registration, identity verification, session and accoun
 2. Connect authenticated payer and guardian sessions and verified guardian enrollment. Keep the guardian payload limited and preserve authorization on every read and action.
 3. Agree on the privacy-safe event or notification contract. Re-fetch authoritative status on reconnect and keep expiry and fallback decisions on the backend.
 4. Replace the demo header with the agreed server-side preference contract. Continue to use the backend's `guardian_deadline` in both windows. Integrate independent verification when the backend supports it. Review the localized safety copy and test it on target devices.
+
+## Design references
+
+- Public hero reference: [Woven Light Hero](https://21st.dev/@dhileepkumargm/components/woven-light-hero), Dhileep Kumar GM. The particle lock is implemented locally.
+- Sign-in artwork: [Dark Fusion](https://unsplash.com/photos/abstract-chrome-sculpture-on-black-background-vmvlYqgURY4) by Luke Hales, under the [Unsplash License](https://unsplash.com/license).
