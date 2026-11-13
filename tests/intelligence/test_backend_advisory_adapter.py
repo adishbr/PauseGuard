@@ -14,6 +14,7 @@ Tests cover:
 11. Preservation of caller payment context.
 12. Sanitized error reporting without raw exception or PII leakage.
 13. Rejection of malformed response contract objects.
+14. Response context mismatch rejection.
 """
 
 from datetime import datetime, timezone
@@ -22,11 +23,13 @@ import unittest
 from unittest.mock import patch
 
 from intelligence.advisory.adapter import (
+    DIAGNOSTIC_CONTEXT_MISMATCH,
     DIAGNOSTIC_INVARIANT_VIOLATION,
     DIAGNOSTIC_TIMEOUT,
     DIAGNOSTIC_UNHANDLED_EXCEPTION,
     evaluate_advisory,
 )
+from intelligence.advisory.orchestrator import evaluate_risk_signals
 from intelligence.advisory.types import (
     AdvisoryRequest,
     AdvisoryResponse,
@@ -111,7 +114,7 @@ class TestBackendAdvisoryAdapter(unittest.TestCase):
         self.assertIsNone(response.risk_signals.mule_graph.hop_distance_to_flagged_mule)
 
         self.assertEqual(response.risk_signals.velocity.status, "unavailable")
-        self.assertFalse(response.risk_signals.velocity.structuring_suspected)
+        self.assertIsNone(response.risk_signals.velocity.structuring_suspected)
 
         self.assertEqual(response.risk_signals.transcript.status, "absent")
         self.assertIsNone(response.risk_signals.transcript.coercion_detected)
@@ -375,6 +378,68 @@ class TestBackendAdvisoryAdapter(unittest.TestCase):
         self.assertIsInstance(res_c.risk_signals, RiskSignals)
         self.assertEqual(res_c.risk_signals.evaluation_status, EvaluationStatus.DEGRADED)
         self.assertEqual(res_c.warnings, (DIAGNOSTIC_INVARIANT_VIOLATION,))
+
+    # -------------------------------------------------------------------------
+    # 14. Response Context Mismatch Rejection
+    # -------------------------------------------------------------------------
+    def test_adapter_context_mismatch_rejection(self):
+        """14. Context validation: mismatched payment_id, payer_id, beneficiary_id, or amount degrades cleanly."""
+        req = self._make_base_request(
+            payment_id="pg_orig_123",
+            payer_id="payer_orig_456",
+            beneficiary_id="beneficiary_orig_789",
+            amount_paise=250000,
+            scoring_config=AdvisoryScoringConfig(),
+        )
+
+        # Baseline valid response from real orchestrator
+        valid_resp = evaluate_risk_signals(req)
+        self.assertEqual(valid_resp.risk_signals.evaluation_status, EvaluationStatus.COMPLETE)
+
+        mismatches = [
+            ("payment_id", {"payment_id": "pg_tampered_999"}),
+            ("payer_id", {"payer_id": "payer_tampered_999"}),
+            ("beneficiary_id", {"beneficiary_id": "beneficiary_tampered_999"}),
+            ("amount_paise", {"amount_paise": 99999999}),
+        ]
+
+        for field_name, update_dict in mismatches:
+            with self.subTest(mismatched_field=field_name):
+                # Construct an otherwise valid response with exactly one mismatched context field
+                mismatched_signals = valid_resp.risk_signals.model_copy(update=update_dict)
+                mismatched_resp = AdvisoryResponse(
+                    risk_signals=mismatched_signals,
+                    evaluator_timings_ms=valid_resp.evaluator_timings_ms,
+                    warnings=valid_resp.warnings,
+                )
+
+                with patch("intelligence.advisory.adapter.evaluate_risk_signals", return_value=mismatched_resp):
+                    res = evaluate_advisory(req)
+
+                # 1. Output is an AdvisoryResponse
+                self.assertIsInstance(res, AdvisoryResponse)
+                # 2. risk_signals is a RiskSignals instance
+                self.assertIsInstance(res.risk_signals, RiskSignals)
+                # 3. evaluation_status is DEGRADED
+                self.assertEqual(res.risk_signals.evaluation_status, EvaluationStatus.DEGRADED)
+                # 4. advisory_score is None
+                self.assertIsNone(res.risk_signals.advisory_score)
+                # 5. suggested_caution_level is None
+                self.assertIsNone(res.risk_signals.suggested_caution_level)
+                # 6. Reason codes contain expected markers
+                self.assertIn("RC_ADVISORY_SCORE_UNAVAILABLE", res.risk_signals.reason_codes)
+                self.assertIn("RC_ADVISORY_CONTEXT_MISMATCH", res.risk_signals.reason_codes)
+                # 7. Warning is the sanitized diagnostic
+                self.assertEqual(res.warnings, (DIAGNOSTIC_CONTEXT_MISMATCH,))
+                # 8. All four returned context fields match the ORIGINAL request
+                self.assertEqual(res.risk_signals.payment_id, req.payment_id)
+                self.assertEqual(res.risk_signals.payer_id, req.payer_id)
+                self.assertEqual(res.risk_signals.beneficiary_id, req.beneficiary_id)
+                self.assertEqual(res.risk_signals.amount_paise, req.amount_paise)
+                # 9. All three advisory-only invariants are preserved
+                self.assertIs(res.risk_signals.can_authorize_payment, False)
+                self.assertIs(res.risk_signals.can_execute_payment, False)
+                self.assertIs(res.risk_signals.advisory_only, True)
 
 
 if __name__ == "__main__":

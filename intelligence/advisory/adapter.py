@@ -25,6 +25,7 @@ from intelligence.schemas.risk_signals import RiskSignals, make_degraded_advisor
 DIAGNOSTIC_TIMEOUT: Final[str] = "advisory_evaluation_timeout"
 DIAGNOSTIC_UNHANDLED_EXCEPTION: Final[str] = "advisory_evaluator_unhandled_exception"
 DIAGNOSTIC_INVARIANT_VIOLATION: Final[str] = "advisory_response_safety_invariant_violation"
+DIAGNOSTIC_CONTEXT_MISMATCH: Final[str] = "advisory_response_context_mismatch"
 
 
 def evaluate_advisory(request: AdvisoryRequest) -> AdvisoryResponse:
@@ -74,6 +75,31 @@ def evaluate_advisory(request: AdvisoryRequest) -> AdvisoryResponse:
                 risk_signals=degraded_signals,
                 evaluator_timings_ms={},
                 warnings=(DIAGNOSTIC_INVARIANT_VIOLATION,),
+            )
+
+        # Response context validation against original request
+        sig = response.risk_signals
+        if (
+            sig.payment_id != request.payment_id
+            or sig.payer_id != request.payer_id
+            or sig.beneficiary_id != request.beneficiary_id
+            or sig.amount_paise != request.amount_paise
+        ):
+            degraded_signals = make_degraded_advisory(
+                payment_id=request.payment_id,
+                payer_id=request.payer_id,
+                beneficiary_id=request.beneficiary_id,
+                amount_paise=request.amount_paise,
+                degraded_reasons=(DIAGNOSTIC_CONTEXT_MISMATCH,),
+                reason_codes=(
+                    "RC_ADVISORY_SCORE_UNAVAILABLE",
+                    "RC_ADVISORY_CONTEXT_MISMATCH",
+                ),
+            )
+            return AdvisoryResponse(
+                risk_signals=degraded_signals,
+                evaluator_timings_ms={},
+                warnings=(DIAGNOSTIC_CONTEXT_MISMATCH,),
             )
 
         return response
