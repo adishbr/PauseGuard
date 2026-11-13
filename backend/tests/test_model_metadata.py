@@ -19,6 +19,7 @@ from app.models.metadata import (
     MockAccount,
     OtpChallenge,
     Payment,
+    PaymentAppeal,
     RazorpayOrder,
     RazorpayPayment,
     RazorpayWebhookEvent,
@@ -37,6 +38,7 @@ ALL_TABLES = [
     "accounts",
     "safe_lock_states",
     "payments",
+    "payment_appeals",
     "guardian_decisions",
     "ledger_entries",
     "audit_events",
@@ -57,6 +59,7 @@ ALL_MODELS = (
     MockAccount,
     SafeLockState,
     Payment,
+    PaymentAppeal,
     GuardianDecision,
     LedgerEntry,
     AuditEvent,
@@ -164,6 +167,8 @@ def test_timestamps_are_timezone_aware_and_required():
                     "revoked_at",
                     "consumed_at",
                     "accepted_at",
+                    "step_up_verified_at",
+                    "resolved_at",
                 ):
                     if field.table.name == "identity_assurances" and field.name == "verified_at":
                         assert field.nullable is False

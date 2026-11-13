@@ -33,6 +33,16 @@ from app.auth.schemas import (
     PaymentWarningAckResponse,
     RedactedPaymentView,
 )
+from app.auth.v5_schemas import (
+    BackupGuardianActivateResponse,
+    PaymentAppealCreateRequest,
+    PaymentAppealResolveRequest,
+    PaymentAppealView,
+    PaymentRetryRequest,
+    PaymentStepUpRequest,
+    PaymentStepUpResponse,
+    PaymentUpdateRequest,
+)
 from app.config import load_settings
 from app.models.roles import UserRole
 from app.services.events import broadcast_event_sync
@@ -440,5 +450,136 @@ def confirm_payment(
         status=res.status,
         payer_id=actor.user_id,
         amount_paise=res.amount_paise,
+    )
+    return res
+
+
+@router.patch("/{payment_id}", response_model=FullPaymentView)
+def update_payment(
+    payment_id: str,
+    http_request: Request,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    request: PaymentUpdateRequest,
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> FullPaymentView:
+    """Modify non-terminal payment fields; invalidates any prior guardian approval on payee/amount change."""
+    res = engine.update_payment(actor, payment_id, request)
+    gid = UUID(res.assigned_guardian_id) if res.assigned_guardian_id else None
+    _schedule_post_commit_broadcast(
+        http_request,
+        payment_id=res.id,
+        event_type="PAYMENT_MODIFIED",
+        status=res.status,
+        payer_id=actor.user_id,
+        assigned_guardian_id=gid,
+        tier=res.tier,
+        amount_paise=res.amount_paise,
+        guardian_deadline=res.guardian_deadline,
+    )
+    return res
+
+
+@router.post("/{payment_id}/step-up/verify", response_model=PaymentStepUpResponse)
+def verify_payment_step_up(
+    payment_id: str,
+    http_request: Request,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    request: PaymentStepUpRequest,
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> PaymentStepUpResponse:
+    """Verify payer step-up authentication challenge (WebAuthn stub or OTP step-up)."""
+    res = engine.verify_step_up(actor, payment_id, request)
+    _schedule_post_commit_broadcast(
+        http_request,
+        payment_id=res.payment_id,
+        event_type="STEP_UP_VERIFIED",
+        status=res.status,
+        payer_id=actor.user_id,
+    )
+    return res
+
+
+@router.post("/{payment_id}/fallback/backup", response_model=BackupGuardianActivateResponse)
+def activate_backup_guardian(
+    payment_id: str,
+    http_request: Request,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> BackupGuardianActivateResponse:
+    """Re-route pending/fallback payment review to an active enrolled backup guardian."""
+    res = engine.activate_backup_guardian(actor, payment_id)
+    _schedule_post_commit_broadcast(
+        http_request,
+        payment_id=res.payment_id,
+        event_type="BACKUP_GUARDIAN_ACTIVATED",
+        status=res.status,
+        payer_id=actor.user_id,
+        assigned_guardian_id=res.assigned_guardian_id,
+        guardian_deadline=res.guardian_deadline.isoformat(),
+    )
+    return res
+
+
+@router.post("/{payment_id}/appeals", response_model=PaymentAppealView, status_code=status.HTTP_201_CREATED)
+def create_payment_appeal(
+    payment_id: str,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    request: PaymentAppealCreateRequest,
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> PaymentAppealView:
+    """Submit a payer false-alert or fallback appeal on an eligible blocked/failed payment."""
+    return engine.create_appeal(actor, payment_id, request)
+
+
+@router.get("/{payment_id}/appeals", response_model=list[PaymentAppealView])
+def list_payment_appeals(
+    payment_id: str,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> list[PaymentAppealView]:
+    """List appeals filed for a payment (owning payer, analyst, or admin)."""
+    return engine.list_appeals(actor, payment_id)
+
+
+@router.post("/{payment_id}/appeals/{appeal_id}/resolve", response_model=PaymentAppealView)
+def resolve_payment_appeal(
+    payment_id: str,
+    appeal_id: UUID,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    request: PaymentAppealResolveRequest,
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> PaymentAppealView:
+    """Analyst/Admin-only appeal resolution (never callable by payer for self-approval)."""
+    return engine.resolve_appeal(actor, payment_id, appeal_id, request)
+
+
+@router.post("/{payment_id}/retry", response_model=FullPaymentView, status_code=status.HTTP_201_CREATED)
+def retry_payment(
+    payment_id: str,
+    http_request: Request,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    request: PaymentRetryRequest,
+    engine: Annotated[Any, Depends(get_payment_engine)],
+) -> FullPaymentView:
+    """Create a safe child payment preserving parent fraud lineage after eligible failure/appeal."""
+    child_advisory_stub = PaymentCreateRequest(
+        beneficiary_id="retry_lineage_check",
+        amount_paise=100,
+        purpose=request.purpose or "retry",
+        idempotency_key=request.idempotency_key,
+    )
+    advisory_signals = _evaluate_payment_advisory_bounded(actor, child_advisory_stub)
+    res = engine.retry_payment(actor, payment_id, request, advisory_signals=advisory_signals)
+    gid = UUID(res.assigned_guardian_id) if res.assigned_guardian_id else None
+    _schedule_post_commit_broadcast(
+        http_request,
+        payment_id=res.id,
+        event_type="PAYMENT_CREATED",
+        status=res.status,
+        payer_id=actor.user_id,
+        assigned_guardian_id=gid,
+        tier=res.tier,
+        amount_paise=res.amount_paise,
+        guardian_deadline=res.guardian_deadline,
     )
     return res

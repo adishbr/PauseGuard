@@ -105,6 +105,8 @@ class FullPaymentView(BaseModel):
     guardian_deadline: str | None = None
     assigned_guardian_id: str | None = None
     version: int = Field(..., gt=0)
+    parent_payment_id: str | None = None
+    step_up_verified: bool = False
 
 
 class PaymentCreateRequest(BaseModel):

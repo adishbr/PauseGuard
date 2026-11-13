@@ -23,6 +23,7 @@ REVISION_0002 = BACKEND / "migrations/versions/0002_durable_payment_ledger.py"
 REVISION_0003 = BACKEND / "migrations/versions/0003_razorpay_merchant_sandbox.py"
 REVISION_0004 = BACKEND / "migrations/versions/0004_audit_append_sequence.py"
 REVISION_0005 = BACKEND / "migrations/versions/0005_v5_identity_otp_enrollment.py"
+REVISION_0006 = BACKEND / "migrations/versions/0006_v5_appeals_retry_stepup.py"
 
 ALL_MIGRATION_TABLES = [
     "users",
@@ -30,6 +31,7 @@ ALL_MIGRATION_TABLES = [
     "accounts",
     "safe_lock_states",
     "payments",
+    "payment_appeals",
     "guardian_decisions",
     "ledger_entries",
     "audit_events",
@@ -72,8 +74,10 @@ def declaration(expression, revision_path=REVISION_0001):
 @pytest.fixture
 def declared_schema():
     schema = sa.MetaData()
-    for rev in (REVISION_0001, REVISION_0002, REVISION_0003, REVISION_0005):
+    for rev in (REVISION_0001, REVISION_0002, REVISION_0003, REVISION_0005, REVISION_0006):
         for call in operations("upgrade", rev):
+            if call.func.attr == "add_column":
+                continue
             args = [declaration(arg, rev) for arg in call.args]
             kwargs = {kw.arg: declaration(kw.value, rev) for kw in call.keywords}
             if call.func.attr == "create_table":
@@ -81,6 +85,8 @@ def declared_schema():
             else:
                 assert call.func.attr == "create_index"
                 name, table, columns = args
+                if name == "ix_payments_parent_payment_id":
+                    continue
                 sa.Index(name, *(schema.tables[table].c[column] for column in columns), **kwargs)
 
     # Apply additive 0004 revision operations to audit_events schema declaration
@@ -88,6 +94,15 @@ def declared_schema():
     audit_tbl.append_column(sa.Column("append_seq", sa.BigInteger(), nullable=False))
     audit_tbl.append_constraint(sa.CheckConstraint("append_seq > 0", name="ck_audit_events_positive_append_seq"))
     sa.Index("ix_audit_events_append_seq", audit_tbl.c.append_seq, unique=True)
+
+    # Apply additive 0006 columns to payments schema declaration
+    payments_tbl = schema.tables["payments"]
+    payments_tbl.append_column(sa.Column("approved_beneficiary_id", sa.String(length=128), nullable=True))
+    payments_tbl.append_column(sa.Column("approved_amount_paise", sa.BigInteger(), nullable=True))
+    payments_tbl.append_column(sa.Column("approval_snapshot_hash", sa.String(length=128), nullable=True))
+    payments_tbl.append_column(sa.Column("parent_payment_id", sa.String(length=64), nullable=True))
+    payments_tbl.append_column(sa.Column("step_up_verified_at", sa.DateTime(timezone=True), nullable=True))
+    sa.Index("ix_payments_parent_payment_id", payments_tbl.c.parent_payment_id, unique=False)
     return schema
 
 
@@ -95,10 +110,12 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0005_v5_identity_otp_enrollment"]
+    assert scripts.get_heads() == ["0006_v5_appeals_retry_stepup"]
     head = scripts.get_revision("head")
-    assert head.revision == "0005_v5_identity_otp_enrollment"
-    assert head.down_revision == "0004_audit_append_sequence"
+    assert head.revision == "0006_v5_appeals_retry_stepup"
+    assert head.down_revision == "0005_v5_identity_otp_enrollment"
+    rev5 = scripts.get_revision("0005_v5_identity_otp_enrollment")
+    assert rev5.down_revision == "0004_audit_append_sequence"
     rev4 = scripts.get_revision("0004_audit_append_sequence")
     assert rev4.down_revision == "0003_razorpay_merchant_sandbox"
     rev3 = scripts.get_revision("0003_razorpay_merchant_sandbox")
@@ -109,7 +126,13 @@ def test_single_initial_revision_and_no_configured_target():
     assert base.down_revision is None
     assert base.dependencies is None
     assert base.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 5
+    assert len(list(scripts.walk_revisions())) == 6
+
+
+def test_0006_revision_matches_integration_copy():
+    assert REVISION_0006.read_bytes() == (
+        BACKEND / "tests_integration/migrations/versions/0006_v5_appeals_retry_stepup.py"
+    ).read_bytes()
 
 
 def test_0005_revision_matches_integration_copy():

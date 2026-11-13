@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     UniqueConstraint,
     Uuid,
@@ -44,6 +45,9 @@ CANONICAL_PAYMENT_STATUSES = (
 
 STATUS_CHECK_SQL = ", ".join(f"'{s}'" for s in CANONICAL_PAYMENT_STATUSES)
 
+CANONICAL_APPEAL_STATUSES = ("OPEN", "APPROVED_RETRY_ELIGIBLE", "REJECTED")
+APPEAL_STATUS_CHECK_SQL = ", ".join(f"'{s}'" for s in CANONICAL_APPEAL_STATUSES)
+
 
 class Payment(Base):
     """Persistent payment record adhering to canonical V2 state machine topology."""
@@ -57,6 +61,7 @@ class Payment(Base):
         Index("ix_payments_payer_id", "payer_id"),
         Index("ix_payments_status", "status"),
         Index("ix_payments_idempotency_key", "idempotency_key", unique=True),
+        Index("ix_payments_parent_payment_id", "parent_payment_id"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -83,6 +88,13 @@ class Payment(Base):
         nullable=True,
     )
     guardian_deadline: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    approved_beneficiary_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    approved_amount_paise: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    approval_snapshot_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    parent_payment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    step_up_verified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
@@ -139,3 +151,47 @@ class GuardianDecision(Base):
 
     payment: Mapped[Payment] = relationship(back_populates="decision", lazy="raise")
     guardian: Mapped[SyntheticUser] = relationship(foreign_keys=[guardian_id], lazy="raise")
+
+
+class PaymentAppeal(Base):
+    """Durable false-alert / fallback appeal reviewed exclusively by an analyst or admin."""
+
+    __tablename__ = "payment_appeals"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="pk_payment_appeals"),
+        CheckConstraint(f"status IN ({APPEAL_STATUS_CHECK_SQL})", name="ck_payment_appeals_status"),
+        Index("ix_payment_appeals_payment_id", "payment_id"),
+        Index("ix_payment_appeals_status", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False, default=uuid4)
+    payment_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("payments.id", name="fk_payment_appeals_payment", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    payer_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", name="fk_payment_appeals_payer", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="OPEN", server_default="OPEN"
+    )
+    reason: Mapped[str] = mapped_column(String(512), nullable=False)
+    evidence_note: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    resolved_by_id: Mapped[Optional[UUID]] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", name="fk_payment_appeals_resolver", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    resolution_note: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

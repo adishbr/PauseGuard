@@ -167,3 +167,81 @@ class GuardianInvitationAcceptRequest(BaseModel):
     otp_code: str = Field(..., min_length=4, max_length=12)
     explicit_consent: bool = Field(False)
 
+
+class GuardianInvitationSuspendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field("suspected_compromise", min_length=3, max_length=256)
+
+
+class PaymentUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    beneficiary_id: str | None = Field(None, min_length=1, max_length=128)
+    amount_paise: int | None = Field(None, gt=0)
+    purpose: str | None = Field(None, min_length=1, max_length=128)
+
+
+class PaymentStepUpRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    challenge_method: Literal["webauthn_stub", "otp_step_up"] = "webauthn_stub"
+    assertion_token: str = Field(..., min_length=4, max_length=256)
+
+
+class PaymentStepUpResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    payment_id: str
+    status: str
+    step_up_verified: bool
+    verified_at: datetime
+    is_mock_step_up: bool = True
+
+
+class PaymentAppealCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field(..., min_length=5, max_length=512)
+    evidence_note: str | None = Field(None, max_length=512)
+
+
+class PaymentAppealResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approved: bool
+    resolution_note: str = Field(..., min_length=3, max_length=512)
+
+
+class PaymentAppealView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    appeal_id: UUID
+    payment_id: str
+    payer_id: UUID
+    status: str
+    reason: str
+    evidence_note: str | None = None
+    resolved_by_id: UUID | None = None
+    resolution_note: str | None = None
+    resolved_at: datetime | None = None
+    created_at: datetime
+
+
+class PaymentRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    idempotency_key: str = Field(..., min_length=1, max_length=128)
+    purpose: str | None = Field(None, min_length=1, max_length=128)
+
+
+class BackupGuardianActivateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    payment_id: str
+    status: str
+    assigned_guardian_id: UUID
+    guardian_deadline: datetime
+    backup_role_slot: str = "backup"
+
+

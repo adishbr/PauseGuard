@@ -408,6 +408,7 @@ class GuardianInvitationService:
                 guardian_id=guardian.user_id,
                 relationship=row.relationship_label,
                 notification_channel=row.notification_channel,
+                role_slot=row.role_slot,
             )
 
         is_mock = self._settings.environment in {"local", "test"} and self._settings.mode == "mock"
@@ -486,6 +487,45 @@ class GuardianInvitationService:
         is_mock = self._settings.environment in {"local", "test"} and self._settings.mode == "mock"
         return _to_view_dict(row, is_mock=is_mock)
 
+    def suspend_invitation(
+        self,
+        *,
+        actor: TrustedActorContext,
+        invitation_id: UUID,
+        reason: str = "suspected_compromise",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Suspend an active or pending guardian link immediately (owning payer, analyst, or admin)."""
+        current_time = now or datetime.now(timezone.utc)
+        row = self._get_invitation_for_update(invitation_id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Guardian invitation not found.")
+
+        is_payer = row.payer_id == actor.user_id
+        is_privileged = UserRole.ANALYST in actor.roles or UserRole.ADMIN in actor.roles
+        if not (is_payer or is_privileged):
+            raise AuthorizationError("Forbidden: Only the owning payer, analyst, or admin can suspend a guardian link.")
+        if row.status in _INVITE_TERMINAL_STATES or row.status == "SUSPENDED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot suspend invitation in state {row.status}.",
+            )
+
+        was_active = row.status == "ACTIVE"
+        row.status = "SUSPENDED"
+        row.updated_at = current_time
+        if self._db is not None:
+            self._db.flush()
+        elif was_active:
+            from app.services.guardian_service import get_guardian_service
+            get_guardian_service().suspend_guardian_link(
+                payer_id=row.payer_id,
+                guardian_id=row.guardian_user_id,
+            )
+
+        is_mock = self._settings.environment in {"local", "test"} and self._settings.mode == "mock"
+        return _to_view_dict(row, is_mock=is_mock)
+
     def get_active_guardian_for_payer(self, payer_id: UUID) -> UUID | None:
         if self._db is not None:
             from app.models.identity import GuardianInvitation
@@ -504,6 +544,23 @@ class GuardianInvitationService:
                 return primary.guardian_user_id
             backup = next((r for r in rows if r.role_slot == "backup" and r.guardian_user_id), None)
             return backup.guardian_user_id if backup is not None else None
+        return None
+
+    def get_backup_guardian_for_payer(self, payer_id: UUID) -> UUID | None:
+        if self._db is not None:
+            from app.models.identity import GuardianInvitation
+
+            rows = self._db.execute(
+                select(GuardianInvitation)
+                .where(
+                    GuardianInvitation.payer_id == payer_id,
+                    GuardianInvitation.role_slot == "backup",
+                    GuardianInvitation.status == "ACTIVE",
+                )
+            ).scalars().all()
+            for r in rows:
+                if r.guardian_user_id is not None:
+                    return r.guardian_user_id
         return None
 
     def _get_invitation_for_update(self, invitation_id: UUID) -> Any:

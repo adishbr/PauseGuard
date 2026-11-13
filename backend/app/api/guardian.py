@@ -29,6 +29,7 @@ from app.auth.v5_schemas import (
     GuardianInvitationAcceptRequest,
     GuardianInvitationCreateRequest,
     GuardianInvitationListResponse,
+    GuardianInvitationSuspendRequest,
     GuardianInvitationView,
 )
 from app.config import load_settings
@@ -220,6 +221,19 @@ def revoke_guardian_invitation(
     """Payer or guardian revokes a guardian invitation or active guardianship link."""
     svc = GuardianInvitationService(**ctx)
     res = svc.revoke_invitation(actor=actor, invitation_id=invitation_id)
+    return GuardianInvitationView(**res)
+
+
+@router.post("/invitations/{invitation_id}/suspend", response_model=GuardianInvitationView)
+def suspend_guardian_invitation(
+    invitation_id: UUID,
+    payload: GuardianInvitationSuspendRequest,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Immediately suspend a potentially compromised guardian link (payer, analyst, or admin)."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.suspend_invitation(actor=actor, invitation_id=invitation_id, reason=payload.reason)
     return GuardianInvitationView(**res)
 
 
