@@ -369,12 +369,14 @@ def test_durable_engine_audit_event_hash_chain():
 
     # First event
     ev1 = engine._append_audit_event("PAYMENT_CREATED", actor, payment_id="pg_001", payload={"test": 1})
+    assert ev1.append_seq == 1
     assert ev1.prev_hash == "0" * 64
     assert len(ev1.event_hash) == 64
 
     # Second event linked to first
     session.query.return_value.order_by.return_value.first.return_value = ev1
     ev2 = engine._append_audit_event("PAYMENT_EXECUTED", actor, payment_id="pg_001", payload={"test": 2})
+    assert ev2.append_seq == 2
     assert ev2.prev_hash == ev1.event_hash
     assert ev2.event_hash != ev1.event_hash
 

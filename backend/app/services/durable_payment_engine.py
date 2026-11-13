@@ -109,6 +109,14 @@ class DurablePaymentEngine:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def _allocate_audit_append_seq(self, last_event: Optional[AuditEvent]) -> int:
+        bind = getattr(self.session, "bind", None)
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+        if dialect_name == "postgresql":
+            return int(self.session.execute(text("SELECT nextval('audit_events_append_seq')")).scalar_one())
+        last_seq = getattr(last_event, "append_seq", None)
+        return (last_seq + 1) if isinstance(last_seq, int) and last_seq >= 1 else 1
+
     def _append_audit_event(
         self,
         event_type: str,
@@ -119,6 +127,7 @@ class DurablePaymentEngine:
         payload_data = payload or {}
 
         # Concurrency protection: serialize global audit writes across concurrent transactions in PostgreSQL
+        # Lock MUST be acquired before allocating append_seq or querying the current chain tail.
         bind = getattr(self.session, "bind", None)
         if bind is not None and getattr(getattr(bind, "dialect", None), "name", None) == "postgresql":
             self.session.execute(
@@ -126,17 +135,19 @@ class DurablePaymentEngine:
                 {"lock_id": AUDIT_CHAIN_ADVISORY_LOCK_ID},
             )
 
-        # Get latest event for hash chaining with deterministic tie-breaking
+        # Get latest event for hash chaining using authoritative monotonic append_seq (never created_at/UUID)
         last_event = (
             self.session.query(AuditEvent)
-            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .order_by(AuditEvent.append_seq.desc())
             .first()
         )
+        next_seq = self._allocate_audit_append_seq(last_event)
         prev_hash = last_event.event_hash if last_event else GENESIS_HASH
         actor_role = next(iter(actor.roles)).value if actor.roles else "unknown"
         event_hash = _compute_hash(prev_hash, event_type, payment_id, actor.user_id, payload_data)
 
         audit_entry = AuditEvent(
+            append_seq=next_seq,
             payment_id=payment_id,
             event_type=event_type,
             actor_id=actor.user_id,
@@ -863,7 +874,7 @@ class DurablePaymentEngine:
         events = (
             self.session.query(AuditEvent)
             .filter(AuditEvent.payment_id == payment_id)
-            .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+            .order_by(AuditEvent.append_seq.asc(), AuditEvent.created_at.asc())
             .all()
         )
 
@@ -871,6 +882,7 @@ class DurablePaymentEngine:
             return [
                 {
                     "id": str(e.id),
+                    "append_seq": e.append_seq,
                     "event_type": e.event_type,
                     "payment_id": e.payment_id,
                     "actor_id": str(e.actor_id),
@@ -947,20 +959,24 @@ class DurablePaymentEngine:
         return safe_lock.is_locked, safe_lock.version, updated_at
 
     def verify_audit_chain(self) -> tuple[bool, int, str]:
-        """Verify the integrity of the database audit hash chain."""
-        events = self.session.query(AuditEvent).order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc()).all()
+        """Verify the integrity of the database audit hash chain in authoritative append order."""
+        events = self.session.query(AuditEvent).order_by(AuditEvent.append_seq.asc()).all()
         if not events:
             return True, 0, GENESIS_HASH
         prev_hash = GENESIS_HASH
+        seen_seqs: set[int] = set()
         for event in events:
+            if not isinstance(event.append_seq, int) or event.append_seq <= 0 or event.append_seq in seen_seqs:
+                return False, len(events), event.event_hash
+            seen_seqs.add(event.append_seq)
             if event.prev_hash != prev_hash:
-                return False, len(events), event.prev_hash
+                return False, len(events), event.prev_hash or ""
             expected_hash = _compute_hash(
                 prev_hash,
                 event.event_type,
                 event.payment_id,
                 event.actor_id,
-                event.payload_json,
+                event.payload_json if event.payload_json is not None else {},
             )
             if event.event_hash != expected_hash:
                 return False, len(events), event.event_hash
