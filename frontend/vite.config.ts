@@ -8,7 +8,7 @@ const backendTarget = process.env.PAUSEGUARD_BACKEND_URL || 'http://127.0.0.1:80
 
 export default defineConfig({
   server: {
-    host: '0.0.0.0',
+    host: useRealBackend ? '127.0.0.1' : '0.0.0.0',
     port: 5173,
     strictPort: true,
     proxy: useRealBackend
@@ -17,12 +17,25 @@ export default defineConfig({
             target: backendTarget,
             changeOrigin: true,
             ws: true,
+            xfwd: true,
+            bypass(req) {
+              const remoteAddr = req.socket?.remoteAddress
+              if (remoteAddr) {
+                const isLoopback =
+                  remoteAddr === '127.0.0.1' ||
+                  remoteAddr === '::1' ||
+                  remoteAddr === '::ffff:127.0.0.1'
+                if (!isLoopback && req.url?.startsWith('/api/v2/demo/')) {
+                  return false
+                }
+              }
+            },
           },
         }
       : undefined,
   },
   preview: {
-    host: '0.0.0.0',
+    host: useRealBackend ? '127.0.0.1' : '0.0.0.0',
     port: 5173,
     strictPort: true,
   },

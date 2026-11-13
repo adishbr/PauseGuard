@@ -23,6 +23,7 @@ import { demoAccountPath } from '../types/account.ts'
 import type { DemoSession } from '../types/account.ts'
 import type { AdminAuditResponse, AuditVerifyResult } from '../types/admin.ts'
 import { AccountError, sessionExpired } from './accountApi.ts'
+import { isRealBackendMode } from './backendMode.ts'
 
 export class AdminApiError extends Error {
   constructor(message: string) {
@@ -61,9 +62,13 @@ async function adminRequest<T>(url: string, adminToken: string, body?: object): 
     window.dispatchEvent(new CustomEvent(sessionExpired, { detail: adminToken }))
   }
   if (!response.ok || !data) {
+    const fallbackMessage =
+      response.status === 404 && url.startsWith('/__pauseguard/demo')
+        ? 'Demo service endpoint is not available on this host. Run locally with Vite mock middleware or configure the FastAPI backend.'
+        : 'Admin service could not complete this action.'
     throw new AccountError(
       response.status,
-      typeof data?.detail === 'string' ? data.detail : 'Admin service could not complete this action.',
+      typeof data?.detail === 'string' ? data.detail : fallbackMessage,
     )
   }
   return data as T
@@ -74,15 +79,30 @@ export const adminMockApi = {
    * Obtains or updates the explicitly authorized synthetic payer session for admin Mode A testing.
    * Requires a valid admin bearer token; rejected (403) for payer/guardian tokens.
    */
-  getSyntheticPayerSession: (adminToken: string, safeLock?: boolean) =>
-    adminRequest<DemoSession>(`${demoAccountPath}/admin/test-payer`, adminToken,
-      typeof safeLock === 'boolean' ? { safeLock } : {}),
+  getSyntheticPayerSession: async (adminToken: string, safeLock?: boolean) => {
+    if (isRealBackendMode()) {
+      throw new AccountError(
+        501,
+        'Synthetic admin test-payer minting is only available in local mock mode. Sign in with a payer account or bearer token in real-backend mode.',
+      )
+    }
+    return adminRequest<DemoSession>(`${demoAccountPath}/admin/test-payer`, adminToken,
+      typeof safeLock === 'boolean' ? { safeLock } : {})
+  },
 
   /**
    * Fetches synthetic test payments and hash-chained audit events created in the admin sandbox.
    * Requires a valid admin bearer token.
    */
-  getAudit: (adminToken: string, paymentId?: string) => {
+  getAudit: async (adminToken: string, paymentId?: string): Promise<AdminAuditResponse> => {
+    if (isRealBackendMode()) {
+      if (!paymentId) return { payments: [], events: [] }
+      const events = await adminRequest<AdminAuditResponse['events']>(
+        `/api/v2/payments/${encodeURIComponent(paymentId)}/events`,
+        adminToken,
+      )
+      return { payments: [], events: Array.isArray(events) ? events : [] }
+    }
     const query = paymentId ? `?paymentId=${encodeURIComponent(paymentId)}` : ''
     return adminRequest<AdminAuditResponse>(`${demoAccountPath}/admin/audit${query}`, adminToken)
   },
