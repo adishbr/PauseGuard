@@ -17,6 +17,7 @@ from app.api.safety import (
     safe_lock_router,
     safety_router,
 )
+from app.api.v5_auth import auth_v5_router, identity_router
 from app.api.websocket import router as websocket_router
 from app.auth.router import router as auth_router
 from app.config import Settings, load_settings
@@ -49,6 +50,8 @@ def create_app(
     # Mount routers
     application.include_router(health_router, prefix="/api/v2")
     application.include_router(auth_router)
+    application.include_router(auth_v5_router)
+    application.include_router(identity_router)
     application.include_router(guardian_router)
     application.include_router(payments_router)
     application.include_router(account_router)

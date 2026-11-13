@@ -240,7 +240,7 @@ class DurablePaymentEngine:
             initial_status = policy_res.target_status
         elif policy_res.requires_guardian:
             tier = policy_res.tier
-            authoritative_guardian = get_authoritative_guardian_for_payer(actor.user_id)
+            authoritative_guardian = self._resolve_authoritative_guardian(actor.user_id)
             if authoritative_guardian is not None:
                 initial_status = PaymentStatus.AWAITING_GUARDIAN.value
                 assigned_guardian_id = authoritative_guardian
@@ -383,7 +383,7 @@ class DurablePaymentEngine:
                 detail=f"Payment {payment_id} not found",
             )
 
-        verify_guardian_to_payer_relationship(
+        self._authorize_guardian_decision_actor(
             actor=actor,
             payer_id=payment.payer_id,
             assigned_guardian_id=payment.assigned_guardian_id,
@@ -982,5 +982,80 @@ class DurablePaymentEngine:
                 return False, len(events), event.event_hash
             prev_hash = event.event_hash
         return True, len(events), events[-1].event_hash
+
+    def _resolve_authoritative_guardian(self, payer_id: UUID) -> Optional[UUID]:
+        """Resolve an active durable V5 GuardianInvitation first, falling back to V4.1 enrollments."""
+        from app.models.identity import GuardianInvitation
+
+        rows = (
+            self.session.query(GuardianInvitation)
+            .filter(
+                GuardianInvitation.payer_id == payer_id,
+                GuardianInvitation.status == "ACTIVE",
+                GuardianInvitation.guardian_user_id.isnot(None),
+            )
+            .all()
+        )
+        if isinstance(rows, list) and rows:
+            primary = next((r for r in rows if r.role_slot == "primary"), None)
+            chosen = primary or rows[0]
+            return chosen.guardian_user_id
+        return get_authoritative_guardian_for_payer(payer_id)
+
+    def _authorize_guardian_decision_actor(
+        self,
+        *,
+        actor: TrustedActorContext,
+        payer_id: UUID,
+        assigned_guardian_id: Optional[UUID],
+    ) -> None:
+        """Authorize a guardian decision against either durable V5 invitations or V4.1 enrollment."""
+        from app.auth.exceptions import AuthorizationError, GuardianAssignmentError
+        from app.models.identity import GuardianInvitation, IdentityAssurance
+
+        if UserRole.GUARDIAN not in actor.roles:
+            raise AuthorizationError("Forbidden: Actor does not hold the guardian role")
+        if actor.user_id == payer_id:
+            raise GuardianAssignmentError("Forbidden: Payer cannot act as guardian for their own transaction")
+
+        now = datetime.now(timezone.utc)
+        active_invites = (
+            self.session.query(GuardianInvitation)
+            .filter(
+                GuardianInvitation.payer_id == payer_id,
+                GuardianInvitation.status == "ACTIVE",
+            )
+            .all()
+        )
+        if isinstance(active_invites, list) and active_invites:
+            matching = next((inv for inv in active_invites if inv.guardian_user_id == actor.user_id), None)
+            if matching is None:
+                raise GuardianAssignmentError(
+                    "Forbidden: Actor is not an active enrolled guardian for this payer"
+                )
+            if assigned_guardian_id is not None and assigned_guardian_id != actor.user_id:
+                raise GuardianAssignmentError(
+                    "Forbidden: Supplied guardian does not match authoritative server enrollment"
+                )
+            assurance = (
+                self.session.query(IdentityAssurance)
+                .filter(
+                    IdentityAssurance.user_id == actor.user_id,
+                    IdentityAssurance.revoked.is_(False),
+                    IdentityAssurance.expires_at > now,
+                )
+                .first()
+            )
+            if assurance is None:
+                raise GuardianAssignmentError(
+                    "Forbidden: Assigned guardian lacks authoritative server-verified identity assurance"
+                )
+            return
+
+        verify_guardian_to_payer_relationship(
+            actor=actor,
+            payer_id=payer_id,
+            assigned_guardian_id=assigned_guardian_id,
+        )
 
 

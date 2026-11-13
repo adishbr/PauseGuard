@@ -4,6 +4,13 @@ from app.models.account import MockAccount
 from app.models.audit import AuditEvent
 from app.models.database import Base
 from app.models.idempotency import IdempotencyRecord
+from app.models.identity import (
+    GuardianInvitation,
+    IdentityAssurance,
+    OtpChallenge,
+    UserAccount,
+    UserSession,
+)
 from app.models.ledger import LedgerEntry
 from app.models.payment import GuardianDecision, Payment
 from app.models.razorpay import RazorpayOrder, RazorpayPayment, RazorpayWebhookEvent
@@ -15,9 +22,12 @@ metadata = Base.metadata
 __all__ = [
     "AuditEvent",
     "GuardianDecision",
+    "GuardianInvitation",
     "IdempotencyRecord",
+    "IdentityAssurance",
     "LedgerEntry",
     "MockAccount",
+    "OtpChallenge",
     "Payment",
     "RazorpayOrder",
     "RazorpayPayment",
@@ -25,6 +35,8 @@ __all__ = [
     "RoleBinding",
     "SafeLockState",
     "SyntheticUser",
+    "UserAccount",
     "UserRole",
+    "UserSession",
     "metadata",
 ]

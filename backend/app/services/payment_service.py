@@ -129,6 +129,19 @@ class PaymentService:
             self._ledger_entries.clear()
             self._confirm_idempotency_map.clear()
 
+    def ensure_user_initialized(
+        self,
+        user_id: UUID,
+        *,
+        balance_paise: int = DEFAULT_MOCK_BALANCE_PAISE,
+    ) -> None:
+        """Initialize mock account balance and Safe-Lock state for a newly signed-up V5 user."""
+        with self._lock:
+            if user_id not in self._accounts:
+                self._accounts[user_id] = balance_paise
+            if user_id not in self._safe_lock_states:
+                self._safe_lock_states[user_id] = False
+
     def get_account_balance(self, user_id: UUID) -> int:
         """Retrieve current mock account balance in paise."""
         with self._lock:

@@ -61,10 +61,16 @@ try:
         'users', 'role_bindings', 'accounts', 'safe_lock_states',
         'payments', 'guardian_decisions', 'ledger_entries', 'audit_events', 'idempotency_records',
         'razorpay_orders', 'razorpay_payments', 'razorpay_webhook_events',
+        'user_accounts', 'identity_assurances', 'otp_challenges', 'user_sessions', 'guardian_invitations',
     }
     expected_routes = {
         '/api/v2/health', '/api/v2/profile', '/api/v2/demo/session',
+        '/api/v2/auth/signup', '/api/v2/auth/otp/challenge', '/api/v2/auth/otp/verify',
+        '/api/v2/auth/login', '/api/v2/auth/logout',
+        '/api/v2/identity/verify', '/api/v2/identity/status',
         '/api/v2/guardian/enroll', '/api/v2/guardian/status', '/api/v2/guardian/dashboard', '/api/v2/guardian/revoke',
+        '/api/v2/guardian/invitations', '/api/v2/guardian/invitations/{invitation_id}/accept',
+        '/api/v2/guardian/invitations/{invitation_id}/decline', '/api/v2/guardian/invitations/{invitation_id}/revoke',
         '/api/v2/guardian/calls/{call_id}/status', '/api/v2/guardian/calls/provider-callback',
         '/api/v2/payments', '/api/v2/payments/{payment_id}',
         '/api/v2/payments/{payment_id}/events',

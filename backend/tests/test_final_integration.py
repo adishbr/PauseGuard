@@ -298,36 +298,51 @@ def test_purpose_challenge_coercion_detection(client):
 
 
 def test_anti_smurfing_velocity_check(client):
-    headers = {"Authorization": f"Bearer {SYNTHETIC_PAYER_TOKEN}"}
+    payer_headers = {"Authorization": f"Bearer {SYNTHETIC_PAYER_TOKEN}"}
+    analyst_headers = {"Authorization": f"Bearer {SYNTHETIC_ANALYST_TOKEN}"}
 
-    # Attempt 1
+    # Non-privileged payer cannot probe another subject_id
+    cross_res = client.post(
+        "/api/v2/safety/anti-smurfing/check",
+        headers=payer_headers,
+        json={"amount_paise": 4000000, "subject_id": "smurf_target_1"},
+    )
+    assert cross_res.status_code == 403
+
+    # Analyst evaluates specified target cleanly across 3 structuring attempts
     res1 = client.post(
         "/api/v2/safety/anti-smurfing/check",
-        headers=headers,
+        headers=analyst_headers,
         json={"amount_paise": 4000000, "subject_id": "smurf_target_1"},
     )
     assert res1.status_code == 200
     assert res1.json()["suspicious"] is False
     assert res1.json()["attempt_count"] == 1
 
-    # Attempt 2
     res2 = client.post(
         "/api/v2/safety/anti-smurfing/check",
-        headers=headers,
+        headers=analyst_headers,
         json={"amount_paise": 4000000, "subject_id": "smurf_target_1"},
     )
     assert res2.status_code == 200
     assert res2.json()["attempt_count"] == 2
 
-    # Attempt 3 (triggers structuring threshold)
     res3 = client.post(
         "/api/v2/safety/anti-smurfing/check",
-        headers=headers,
+        headers=analyst_headers,
         json={"amount_paise": 4000000, "subject_id": "smurf_target_1"},
     )
     assert res3.status_code == 200
     assert res3.json()["attempt_count"] == 3
     assert res3.json()["suspicious"] is True
+
+    # Payer checking their own velocity (omitting foreign subject_id) succeeds cleanly
+    own_res = client.post(
+        "/api/v2/safety/anti-smurfing/check",
+        headers=payer_headers,
+        json={"amount_paise": 100000},
+    )
+    assert own_res.status_code == 200
 
 
 # ---------------------------------------------------------------------------

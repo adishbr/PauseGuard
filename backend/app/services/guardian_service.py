@@ -300,6 +300,45 @@ class GuardianService:
                 if (r.guardian_id == guardian_id or str(r.guardian_id) == str(guardian_id)) and r.status == "active"
             )
 
+    def activate_verified_invitation_link(
+        self,
+        *,
+        enrollment_id: UUID,
+        payer_id: UUID,
+        guardian_id: UUID,
+        relationship: str,
+        notification_channel: str,
+    ) -> None:
+        """Sync a verified V5 GuardianInvitation promotion into active runtime guardian state."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._verified_identities[guardian_id] = GuardianIdentityEvidence(
+                guardian_id=guardian_id,
+                is_verified=True,
+                method="trusted_backend_verification",
+            )
+            self._enrollments[payer_id] = EnrollmentRecord(
+                enrollment_id=enrollment_id,
+                payer_id=payer_id,
+                guardian_id=guardian_id,
+                relationship=relationship,
+                notification_channel=notification_channel,
+                status="active",
+                enrolled_at=now_str,
+            )
+
+    def clear_invitation_link(
+        self,
+        *,
+        payer_id: UUID,
+        guardian_id: Optional[UUID] = None,
+    ) -> None:
+        """Clear runtime active guardian link upon V5 invitation revocation."""
+        with self._lock:
+            rec = self._enrollments.get(payer_id)
+            if rec is not None and (guardian_id is None or rec.guardian_id == guardian_id):
+                del self._enrollments[payer_id]
+
 
 
 _default_guardian_service: Optional[GuardianService] = None

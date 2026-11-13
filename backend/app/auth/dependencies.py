@@ -12,10 +12,38 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.auth.exceptions import AuthenticationError, AuthorizationError
 from app.auth.identities import is_demo_mode_allowed, resolve_synthetic_token
 from app.models.roles import UserRole
+from app.services.account_auth_service import AccountAuthService
 from app.services.payment_guards import TrustedActorContext
+from app.services.v5_store import get_or_create_v5_mock_store
 
 # HTTPBearer with auto_error=False to allow canonical 401 handling with WWW-Authenticate header
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _resolve_v5_session_actor(request: Request, token: str, settings: object | None) -> TrustedActorContext | None:
+    if not token.startswith("pg_v5_"):
+        return None
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is not None:
+        session = session_factory()
+        try:
+            return AccountAuthService(
+                settings=settings,
+                db_session=session,
+                mock_store=None,
+            ).resolve_bearer_token(token)
+        finally:
+            session.close()
+
+    if getattr(settings, "mode", "mock") == "mock":
+        mock_store = getattr(request.app.state, "v5_identity_store", None)
+        if mock_store is not None:
+            return AccountAuthService(
+                settings=settings,
+                db_session=None,
+                mock_store=mock_store,
+            ).resolve_bearer_token(token)
+    return None
 
 
 def get_current_actor(
@@ -25,7 +53,9 @@ def get_current_actor(
     """Resolve the authenticated actor from the Authorization Bearer token.
 
     SECURITY INVARIANTS:
-    - Fails closed: Rejects demo tokens in production, real mode, or when demo auth is not explicitly enabled.
+    - Resolves server-issued V5 session tokens first (DB or app mock store).
+    - Falls back to synthetic demo tokens ONLY if demo mode is explicitly allowed.
+    - Fails closed: Rejects demo tokens in production, real mode, or when demo auth is disabled.
     - Standard 401 with WWW-Authenticate: Bearer header.
     - Resolves identity strictly from trusted server state, ignoring client headers.
     """
@@ -37,6 +67,10 @@ def get_current_actor(
         raise AuthenticationError("Empty or invalid bearer token")
 
     settings = getattr(request.app.state, "settings", None)
+    v5_actor = _resolve_v5_session_actor(request, token, settings)
+    if v5_actor is not None:
+        return v5_actor
+
     actor = resolve_synthetic_token(token, settings=settings)
 
     if actor is None:

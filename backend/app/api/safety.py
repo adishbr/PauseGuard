@@ -111,7 +111,13 @@ def check_anti_smurfing(
     request: AntiSmurfingCheckRequest,
 ) -> AntiSmurfingCheckResponse:
     """Evaluate rapid transfer structuring and rolling velocity indicators."""
-    subject_id = request.subject_id or str(actor.user_id)
+    privileged = bool(actor.roles & {UserRole.ANALYST, UserRole.ADMIN})
+    if request.subject_id is not None and not privileged and request.subject_id != str(actor.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Non-privileged actors cannot evaluate velocity for another subject_id",
+        )
+    subject_id = request.subject_id if (privileged and request.subject_id) else str(actor.user_id)
     res = _global_smurfing_detector.record_attempt(
         subject_id=subject_id,
         attempt_id=str(uuid4()),

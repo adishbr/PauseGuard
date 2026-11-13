@@ -22,6 +22,7 @@ REVISION_0001 = BACKEND / "migrations/versions/0001_offline_foundation.py"
 REVISION_0002 = BACKEND / "migrations/versions/0002_durable_payment_ledger.py"
 REVISION_0003 = BACKEND / "migrations/versions/0003_razorpay_merchant_sandbox.py"
 REVISION_0004 = BACKEND / "migrations/versions/0004_audit_append_sequence.py"
+REVISION_0005 = BACKEND / "migrations/versions/0005_v5_identity_otp_enrollment.py"
 
 ALL_MIGRATION_TABLES = [
     "users",
@@ -36,6 +37,11 @@ ALL_MIGRATION_TABLES = [
     "razorpay_orders",
     "razorpay_payments",
     "razorpay_webhook_events",
+    "user_accounts",
+    "identity_assurances",
+    "otp_challenges",
+    "user_sessions",
+    "guardian_invitations",
 ]
 
 
@@ -66,7 +72,7 @@ def declaration(expression, revision_path=REVISION_0001):
 @pytest.fixture
 def declared_schema():
     schema = sa.MetaData()
-    for rev in (REVISION_0001, REVISION_0002, REVISION_0003):
+    for rev in (REVISION_0001, REVISION_0002, REVISION_0003, REVISION_0005):
         for call in operations("upgrade", rev):
             args = [declaration(arg, rev) for arg in call.args]
             kwargs = {kw.arg: declaration(kw.value, rev) for kw in call.keywords}
@@ -89,10 +95,12 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0004_audit_append_sequence"]
+    assert scripts.get_heads() == ["0005_v5_identity_otp_enrollment"]
     head = scripts.get_revision("head")
-    assert head.revision == "0004_audit_append_sequence"
-    assert head.down_revision == "0003_razorpay_merchant_sandbox"
+    assert head.revision == "0005_v5_identity_otp_enrollment"
+    assert head.down_revision == "0004_audit_append_sequence"
+    rev4 = scripts.get_revision("0004_audit_append_sequence")
+    assert rev4.down_revision == "0003_razorpay_merchant_sandbox"
     rev3 = scripts.get_revision("0003_razorpay_merchant_sandbox")
     assert rev3.down_revision == "0002_durable_payment_ledger"
     rev2 = scripts.get_revision("0002_durable_payment_ledger")
@@ -101,7 +109,13 @@ def test_single_initial_revision_and_no_configured_target():
     assert base.down_revision is None
     assert base.dependencies is None
     assert base.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 4
+    assert len(list(scripts.walk_revisions())) == 5
+
+
+def test_0005_revision_matches_integration_copy():
+    assert REVISION_0005.read_bytes() == (
+        BACKEND / "tests_integration/migrations/versions/0005_v5_identity_otp_enrollment.py"
+    ).read_bytes()
 
 
 def test_0004_revision_declares_audit_append_seq_and_validates_backfill():
@@ -241,8 +255,9 @@ def test_frozen_revision_postgresql_ddl_matches_orm(declared_schema, table_name)
 
 
 def test_foreign_keys_resolve_without_cycles(declared_schema):
-    first_tables = [table.name for table in declared_schema.sorted_tables[:3]]
-    assert "users" in first_tables
+    ordered_names = [table.name for table in declared_schema.sorted_tables]
+    assert "users" in ordered_names[:5]
+    assert ordered_names.index("users") < ordered_names.index("user_accounts")
     for table in declared_schema.tables.values():
         for foreign_key in table.foreign_keys:
             assert foreign_key.ondelete == "RESTRICT"
