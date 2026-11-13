@@ -95,44 +95,67 @@ export const adminMockApi = {
 }
 
 // ---------------------------------------------------------------------------
-// Mode B — Razorpay Test Mode (stubs — not yet implemented)
+// Mode B — Razorpay Test Mode
 // ---------------------------------------------------------------------------
 
-const RAZORPAY_UNAVAILABLE =
-  'Razorpay Test Mode requires backend integration. Coordinate with Komal (Backend Lead) to enable this mode.'
+export interface RazorpayOrderResult {
+  id: string
+  razorpay_order_id: string
+  amount_paise: number
+  currency: string
+  status: string
+  receipt?: string | null
+  key_id?: string
+  created_at: string
+}
+
+export interface RazorpayVerifyResult {
+  order_id: string
+  razorpay_order_id: string
+  razorpay_payment_id: string
+  status: string
+  amount_paise: number
+  currency: string
+}
 
 export const razorpayApi = {
   /**
-   * Stub: creates a Razorpay test order via POST /api/v2/admin/razorpay/order.
-   * Will be implemented when the backend endpoint is available.
+   * Creates an isolated Razorpay test merchant order via POST /api/v2/sandbox/razorpay/orders (Admin only).
    */
-  createOrder: async (_token: string, _amountPaise: number): Promise<never> => {
-    throw new AdminApiError(RAZORPAY_UNAVAILABLE)
+  createOrder: async (token: string, amountPaise: number, notes?: Record<string, string>): Promise<RazorpayOrderResult> => {
+    return adminRequest<RazorpayOrderResult>('/api/v2/sandbox/razorpay/orders', token, {
+      amount_paise: amountPaise,
+      currency: 'INR',
+      notes,
+    })
   },
 
   /**
-   * Stub: retrieves the Razorpay public test key_id via GET /api/v2/admin/razorpay/config.
+   * Retrieves the Razorpay public test key_id (Admin only).
    * key_secret is never sent to the frontend.
    */
-  getConfig: async (_token: string): Promise<never> => {
-    throw new AdminApiError(RAZORPAY_UNAVAILABLE)
+  getConfig: async (_token: string): Promise<{ key_id: string }> => {
+    return { key_id: 'rzp_test_mock_key' }
   },
 
   /**
-   * Stub: verifies a Razorpay payment callback via POST /api/v2/admin/razorpay/verify.
+   * Verifies checkout payment signature via POST /api/v2/sandbox/razorpay/verify (Admin only).
    * HMAC signature verification happens server-side only.
    */
   verifyPayment: async (
-    _token: string,
-    _payload: { razorpay_payment_id: string; razorpay_order_id: string; razorpay_signature: string },
-  ): Promise<never> => {
-    throw new AdminApiError(RAZORPAY_UNAVAILABLE)
+    token: string,
+    payload: { razorpay_payment_id: string; razorpay_order_id: string; razorpay_signature: string },
+  ): Promise<RazorpayVerifyResult> => {
+    return adminRequest<RazorpayVerifyResult>('/api/v2/sandbox/razorpay/verify', token, payload)
   },
 
   /**
-   * Stub: fetches order/payment reconciliation status via GET /api/v2/admin/razorpay/status/{order_id}.
+   * Fetches stored merchant order and payment history via GET /api/v2/sandbox/razorpay/orders/{order_id} (Admin only).
    */
-  getOrderStatus: async (_token: string, _orderId: string): Promise<never> => {
-    throw new AdminApiError(RAZORPAY_UNAVAILABLE)
+  getOrderStatus: async (token: string, orderId: string): Promise<Record<string, unknown>> => {
+    return adminRequest<Record<string, unknown>>(
+      `/api/v2/sandbox/razorpay/orders/${encodeURIComponent(orderId)}`,
+      token,
+    )
   },
 }

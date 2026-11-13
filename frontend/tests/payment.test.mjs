@@ -519,3 +519,51 @@ test('admin login, role isolation, synthetic payer context and hash-chained audi
   assert.equal(verifyRes.body.valid, true)
   assert.ok(verifyRes.body.total_events >= 4)
 })
+
+test('Razorpay Test Mode merchant sandbox isolation and admin verification', async (t) => {
+  const { call, account } = await fixture(t)
+
+  // 1. Obtain admin session
+  const adminRes = await account('/session', { role: 'admin', sample: true })
+  assert.equal(adminRes.code, 200)
+  const adminToken = adminRes.body.token
+
+  // 2. Non-admin roles (payer, guardian) cannot call Razorpay sandbox endpoints (403)
+  const payerOrder = await call('/sandbox/razorpay/orders', 'payer', { amount_paise: 50_000 })
+  assert.equal(payerOrder.code, 403)
+
+  const guardianOrder = await call('/sandbox/razorpay/orders', 'guardian', { amount_paise: 50_000 })
+  assert.equal(guardianOrder.code, 403)
+
+  // 3. Admin can inspect config (public key only)
+  const configRes = await call('/sandbox/razorpay/config', adminToken)
+  assert.equal(configRes.code, 200)
+  assert.ok(configRes.body.key_id.startsWith('rzp_test_'))
+
+  // 4. Admin creates an isolated merchant test order
+  const orderRes = await call('/sandbox/razorpay/orders', adminToken, {
+    amount_paise: 250_000,
+    currency: 'INR',
+  })
+  assert.equal(orderRes.code, 200)
+  assert.ok(orderRes.body.id.startsWith('rzp_ord_'))
+  assert.ok(orderRes.body.razorpay_order_id.startsWith('order_'))
+  assert.equal(orderRes.body.amount_paise, 250_000)
+  assert.equal(orderRes.body.status, 'created')
+
+  // 5. Admin verifies checkout signature
+  const verifyRes = await call('/sandbox/razorpay/verify', adminToken, {
+    razorpay_order_id: orderRes.body.razorpay_order_id,
+    razorpay_payment_id: 'pay_test_1234567890',
+    razorpay_signature: 'a'.repeat(64),
+  })
+  assert.equal(verifyRes.code, 200)
+  assert.equal(verifyRes.body.status, 'captured')
+  assert.equal(verifyRes.body.razorpay_order_id, orderRes.body.razorpay_order_id)
+
+  // 6. Admin inspects order status
+  const statusRes = await call(`/sandbox/razorpay/orders/${orderRes.body.razorpay_order_id}`, adminToken)
+  assert.equal(statusRes.code, 200)
+  assert.equal(statusRes.body.id, orderRes.body.razorpay_order_id)
+})
+

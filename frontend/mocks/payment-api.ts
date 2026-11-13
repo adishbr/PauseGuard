@@ -179,6 +179,50 @@ export function createMockApi(clock: () => number = Date.now) {
         return verifyAuditChain()
       }
 
+      if (route.startsWith('/sandbox/razorpay') || route.startsWith('/admin/razorpay')) {
+        if (actor.role !== 'admin') throw new MockError(403, 'Forbidden: Operation requires admin role')
+        if (method === 'GET' && route.endsWith('/config')) {
+          return { key_id: 'rzp_test_mock_key' }
+        }
+        if (method === 'POST' && (route.endsWith('/orders') || route.endsWith('/order'))) {
+          const body = await readBody(request)
+          const amount_paise = body.amount_paise ?? 50000
+          const order_id = `order_${randomUUID().replace(/-/g, '').slice(0, 14)}`
+          const internal_id = `rzp_ord_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+          return {
+            id: internal_id,
+            razorpay_order_id: order_id,
+            amount_paise,
+            currency: 'INR',
+            status: 'created',
+            key_id: 'rzp_test_mock_key',
+            created_at: new Date(clock()).toISOString(),
+          }
+        }
+        if (method === 'POST' && route.endsWith('/verify')) {
+          const body = await readBody(request)
+          return {
+            order_id: body.razorpay_order_id,
+            razorpay_order_id: body.razorpay_order_id,
+            razorpay_payment_id: body.razorpay_payment_id || `pay_${randomUUID().replace(/-/g, '').slice(0, 14)}`,
+            status: 'captured',
+            amount_paise: 50000,
+            currency: 'INR',
+          }
+        }
+        if (method === 'GET' && (route.includes('/orders/') || route.includes('/status/'))) {
+          const orderId = route.split('/').pop()
+          return {
+            id: orderId,
+            razorpay_order_id: orderId,
+            status: 'created',
+            amount_paise: 50000,
+            currency: 'INR',
+            payments: [],
+          }
+        }
+      }
+
       if (method === 'POST' && route === '/payments') {
         if (actor.role !== 'payer') throw new MockError(403, 'This demo role cannot start payments.')
         const body = await readBody(request)
