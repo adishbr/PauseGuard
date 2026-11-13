@@ -1818,7 +1818,8 @@ class TestAuditChainOrderingAndIntegrityRegressions:
             )
             session.commit()
 
-            valid, total, _ = DurablePaymentEngine(session).verify_audit_chain()
+        with pg_session_factory() as verify_session:
+            valid, total, _ = DurablePaymentEngine(verify_session).verify_audit_chain()
             assert valid is False
             assert total == 2
 
