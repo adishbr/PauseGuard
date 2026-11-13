@@ -147,3 +147,130 @@ def resolve_synthetic_token(
     if not is_demo_mode_allowed(settings):
         return None
     return DEMO_TOKEN_REGISTRY.get(token.strip())
+
+
+# ---------------------------------------------------------------------------
+# Synthetic Demo Identity Registry & Resolution
+# ---------------------------------------------------------------------------
+
+class SyntheticDemoIdentity:
+    """Immutable metadata describing a known authorized synthetic demo identity."""
+
+    __slots__ = ("actor", "token", "name", "contact", "aliases", "threshold_paise", "is_admin")
+
+    def __init__(
+        self,
+        actor: TrustedActorContext,
+        token: str,
+        name: str,
+        contact: str,
+        aliases: tuple[str, ...],
+        threshold_paise: int | None = None,
+        is_admin: bool = False,
+    ) -> None:
+        self.actor = actor
+        self.token = token
+        self.name = name
+        self.contact = contact
+        self.aliases = aliases
+        self.threshold_paise = threshold_paise
+        self.is_admin = is_admin
+
+
+SYNTHETIC_DEMO_IDENTITIES: tuple[SyntheticDemoIdentity, ...] = (
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_PAYER,
+        token=SYNTHETIC_PAYER_TOKEN,
+        name="Asha Demo",
+        contact="asha@pauseguard.test",
+        aliases=("asha@pauseguard.test", "+919876543210", "9876543210", "demo-payer", "primary"),
+        threshold_paise=5500000,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_GUARDIAN,
+        token=SYNTHETIC_GUARDIAN_TOKEN,
+        name="Ravi Demo",
+        contact="ravi@pauseguard.test",
+        aliases=("ravi@pauseguard.test", "+919876543211", "9876543211", "demo-guardian", "primary"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_OTHER_PAYER,
+        token=SYNTHETIC_OTHER_PAYER_TOKEN,
+        name="Admin Sandbox Payer",
+        contact="sandbox-payer@pauseguard.test",
+        aliases=("sandbox-payer@pauseguard.test", "other", "secondary", "other_payer", "admin-synthetic-payer"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_ANALYST,
+        token=SYNTHETIC_ANALYST_TOKEN,
+        name="Analyst Demo",
+        contact="analyst@pauseguard.test",
+        aliases=("analyst@pauseguard.test", "primary"),
+        threshold_paise=None,
+    ),
+    SyntheticDemoIdentity(
+        actor=SYNTHETIC_ADMIN,
+        token=SYNTHETIC_ADMIN_TOKEN,
+        name="Admin Demo",
+        contact="admin@pauseguard.test",
+        aliases=("admin@pauseguard.test", "demo-admin", "primary"),
+        threshold_paise=None,
+        is_admin=True,
+    ),
+)
+
+
+def _normalize_contact(contact: str) -> str:
+    cleaned = contact.strip().lower()
+    cleaned = cleaned.replace(" ", "").replace("-", "")
+    if cleaned.startswith("+91") and len(cleaned) == 13:
+        return cleaned[3:]
+    return cleaned
+
+
+def get_authorized_synthetic_identity(
+    role: UserRole,
+    contact: str | None = None,
+    identity_tag: str | None = None,
+) -> SyntheticDemoIdentity | None:
+    """Resolve an authorized synthetic demo identity by role and optional contact/tag.
+
+    SECURITY INVARIANTS:
+    - Never provisions dynamic accounts or accepts arbitrary contacts.
+    - If contact is provided, it must strictly match an authorized synthetic identity.
+    - If no contact is provided, defaults to the primary synthetic identity for that role.
+    """
+    if contact is not None and contact.strip():
+        norm_contact = _normalize_contact(contact)
+        for identity in SYNTHETIC_DEMO_IDENTITIES:
+            if role in identity.actor.roles:
+                for alias in identity.aliases:
+                    if _normalize_contact(alias) == norm_contact:
+                        return identity
+        return None
+
+    if identity_tag is not None and identity_tag.strip():
+        tag = identity_tag.strip().lower()
+        for identity in SYNTHETIC_DEMO_IDENTITIES:
+            if role in identity.actor.roles:
+                for alias in identity.aliases:
+                    if alias.lower() == tag:
+                        return identity
+        return None
+
+    # Default to the primary synthetic identity for this role
+    for identity in SYNTHETIC_DEMO_IDENTITIES:
+        if role in identity.actor.roles and "primary" in identity.aliases:
+            return identity
+
+    return None
+
+
+def get_synthetic_identity_by_actor(actor: TrustedActorContext) -> SyntheticDemoIdentity | None:
+    """Find the synthetic demo identity matching the given actor user ID."""
+    for identity in SYNTHETIC_DEMO_IDENTITIES:
+        if identity.actor.user_id == actor.user_id:
+            return identity
+    return None

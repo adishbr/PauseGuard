@@ -8,7 +8,7 @@ from app.config import ConfigurationError, Settings, load_settings
 
 
 def test_defaults_and_injected_environment():
-    assert load_settings({}) == Settings(environment="local", mode="mock", allow_demo_auth=False)
+    assert load_settings({}) == Settings(environment="local", mode="mock", allow_demo_auth=False, allow_demo_admin=False)
     assert load_settings({"PAUSEGUARD_ENVIRONMENT": "test"}).environment == "test"
     assert load_settings({}).allow_demo_auth is False
 
@@ -21,6 +21,8 @@ def test_only_allowlisted_environment_keys_are_read():
                 "PAUSEGUARD_MODE",
                 "PAUSEGUARD_ALLOW_DEMO_AUTH",
                 "PAUSEGUARD_ENABLE_DEMO_AUTH",
+                "PAUSEGUARD_ALLOW_DEMO_ADMIN",
+                "PAUSEGUARD_ENABLE_DEMO_ADMIN",
             }
             raise KeyError(key)
 

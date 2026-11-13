@@ -63,7 +63,7 @@ try:
         'razorpay_orders', 'razorpay_payments', 'razorpay_webhook_events',
     }
     expected_routes = {
-        '/api/v2/health', '/api/v2/profile',
+        '/api/v2/health', '/api/v2/profile', '/api/v2/demo/session',
         '/api/v2/guardian/enroll', '/api/v2/guardian/status', '/api/v2/guardian/dashboard', '/api/v2/guardian/revoke',
         '/api/v2/guardian/calls/{call_id}/status', '/api/v2/guardian/calls/provider-callback',
         '/api/v2/payments', '/api/v2/payments/{payment_id}',
