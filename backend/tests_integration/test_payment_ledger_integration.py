@@ -199,7 +199,10 @@ class TestGuardianDecisionPersistence:
             roles=frozenset({UserRole.GUARDIAN}),
         )
         engine = DurablePaymentEngine(pg_session)
-        dec_req = GuardianDecisionRequest(approved=True, notes="Approved for equipment purchase")
+        dec_req = GuardianDecisionRequest(
+            approved=True,
+            notes="Approved for equipment purchase",
+        )
 
         with transaction_scope(pg_session):
             resp = engine.record_guardian_decision(actor, payment_id, dec_req)
@@ -208,9 +211,177 @@ class TestGuardianDecisionPersistence:
         assert resp.can_execute_payment is False
 
         # Verify decision row
-        dec_row = pg_session.query(GuardianDecision).filter(GuardianDecision.payment_id == payment_id).one()
+        dec_row = (
+            pg_session.query(GuardianDecision)
+            .filter(GuardianDecision.payment_id == payment_id)
+            .one()
+        )
         assert dec_row.approved is True
         assert dec_row.guardian_id == guardian_id
+
+
+class TestFallbackReviewPersistence:
+    """Verify payer-controlled fallback activation and its safety boundaries."""
+
+    def _create_awaiting_guardian_payment(
+        self,
+        session: Session,
+        payer_id: UUID,
+        guardian_id: UUID,
+        deadline: datetime,
+    ) -> str:
+        """Create a synthetic high-risk payment awaiting guardian review."""
+        _seed_test_payer(session, payer_id)
+        _seed_test_guardian(session, guardian_id)
+
+        payment_id = f"pg_{uuid4().hex[:16]}"
+        payment = Payment(
+            id=payment_id,
+            payer_id=payer_id,
+            beneficiary_id="vendor_fallback_test",
+            amount_paise=250_000,
+            purpose="fallback integration test",
+            status=PaymentStatus.AWAITING_GUARDIAN.value,
+            tier=3,
+            risk_score=90,
+            reason_codes=["RC_LARGE_AMOUNT_DEVIATION"],
+            idempotency_key=f"idem_fallback_{uuid4().hex[:12]}",
+            assigned_guardian_id=guardian_id,
+            guardian_deadline=deadline,
+            version=1,
+        )
+        session.add(payment)
+        session.commit()
+        return payment_id
+
+    def test_payer_can_activate_fallback_after_deadline_without_authorizing_payment(
+        self,
+        pg_session: Session,
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session,
+            payer_id,
+            guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+
+        actor = TrustedActorContext(
+            user_id=payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+
+        with transaction_scope(pg_session):
+            response = DurablePaymentEngine(pg_session).activate_fallback(
+                actor,
+                payment_id,
+            )
+
+        pg_session.expire_all()
+        persisted = (
+            pg_session.query(Payment)
+            .filter_by(id=payment_id)
+            .one()
+        )
+
+        assert response.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+        assert response.can_authorize_payment is False
+
+        assert persisted.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
+        assert persisted.version == 2
+
+        assert (
+            pg_session.query(GuardianDecision)
+            .filter_by(payment_id=payment_id)
+            .count()
+            == 0
+        )
+        assert (
+            pg_session.query(LedgerEntry)
+            .filter_by(payment_id=payment_id)
+            .count()
+            == 0
+        )
+
+    def test_non_owner_cannot_activate_fallback(
+        self,
+        pg_session: Session,
+    ) -> None:
+        payer_id = uuid4()
+        other_payer_id = uuid4()
+        guardian_id = uuid4()
+
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session,
+            payer_id,
+            guardian_id,
+            datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+        _seed_test_payer(pg_session, other_payer_id)
+
+        actor = TrustedActorContext(
+            user_id=other_payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                DurablePaymentEngine(pg_session).activate_fallback(
+                    actor,
+                    payment_id,
+                )
+
+        assert exc_info.value.status_code == 403
+
+        pg_session.expire_all()
+        persisted = (
+            pg_session.query(Payment)
+            .filter_by(id=payment_id)
+            .one()
+        )
+
+        assert persisted.status == PaymentStatus.AWAITING_GUARDIAN.value
+        assert persisted.version == 1
+
+    def test_fallback_cannot_be_activated_before_deadline(
+        self,
+        pg_session: Session,
+    ) -> None:
+        payer_id = uuid4()
+        guardian_id = uuid4()
+
+        payment_id = self._create_awaiting_guardian_payment(
+            pg_session,
+            payer_id,
+            guardian_id,
+            datetime.now(timezone.utc) + timedelta(seconds=60),
+        )
+
+        actor = TrustedActorContext(
+            user_id=payer_id,
+            roles=frozenset({UserRole.PAYER}),
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                DurablePaymentEngine(pg_session).activate_fallback(
+                    actor,
+                    payment_id,
+                )
+
+        assert exc_info.value.status_code == 400
+
+        pg_session.expire_all()
+        persisted = (
+            pg_session.query(Payment)
+            .filter_by(id=payment_id)
+            .one()
+        )
+
+        assert persisted.status == PaymentStatus.AWAITING_GUARDIAN.value
+        assert persisted.version == 1
 
 
 class TestAtomicMockLedgerDebit:
@@ -294,7 +465,9 @@ class TestAtomicMockLedgerDebit:
             roles=frozenset({UserRole.PAYER}),
         )
         engine = DurablePaymentEngine(pg_session)
-        confirm_req = PaymentConfirmRequest(idempotency_key=f"confirm_p2p_pg_{uuid4().hex[:8]}")
+        confirm_req = PaymentConfirmRequest(
+            idempotency_key=f"confirm_p2p_pg_{uuid4().hex[:8]}"
+        )
 
         with transaction_scope(pg_session):
             confirm_resp = engine.confirm_payment(actor, payment_id, confirm_req)
@@ -356,7 +529,9 @@ class TestSafeLockAndTerminalImmutability:
             roles=frozenset({UserRole.PAYER}),
         )
         engine = DurablePaymentEngine(pg_session)
-        confirm_req = PaymentConfirmRequest(idempotency_key=f"confirm_sl_{uuid4().hex[:8]}")
+        confirm_req = PaymentConfirmRequest(
+            idempotency_key=f"confirm_sl_{uuid4().hex[:8]}"
+        )
 
         with pytest.raises(Exception) as exc_info:
             with transaction_scope(pg_session):
@@ -576,7 +751,9 @@ class TestSecurityHardeningPersistence:
         pg_session.add(payment)
         pg_session.commit()
 
-        confirm_req = PaymentConfirmRequest(idempotency_key=f"conf_no_sl_{uuid4().hex[:8]}")
+        confirm_req = PaymentConfirmRequest(
+            idempotency_key=f"conf_no_sl_{uuid4().hex[:8]}"
+        )
         with pytest.raises(HTTPException) as exc_info2:
             with transaction_scope(pg_session):
                 engine.confirm_payment(actor, payment_id, confirm_req)
@@ -584,3 +761,97 @@ class TestSecurityHardeningPersistence:
         assert "Safe-Lock record missing" in exc_info2.value.detail
 
 
+def test_concurrent_cancellation_and_confirmation_are_serialized(
+    pg_session_factory: sessionmaker[Session],
+) -> None:
+    """Concurrent cancellation and confirmation must produce one valid outcome."""
+    payer_id = uuid4()
+    initial_balance = 20_000_000
+    payment_amount = 5_000_000
+    payment_id = f"pg_{uuid4().hex[:16]}"
+
+    with pg_session_factory() as session:
+        _seed_test_payer(session, payer_id, initial_balance=initial_balance)
+        payment = Payment(
+            id=payment_id,
+            payer_id=payer_id,
+            beneficiary_id="vendor_cancel_race",
+            amount_paise=payment_amount,
+            purpose="synthetic cancellation race test",
+            status=PaymentStatus.READY_TO_EXECUTE.value,
+            tier=0,
+            risk_score=10,
+            idempotency_key=f"idem_race_{uuid4().hex[:8]}",
+            version=1,
+        )
+        session.add(payment)
+        session.commit()
+
+    actor = TrustedActorContext(
+        user_id=payer_id,
+        roles=frozenset({UserRole.PAYER}),
+    )
+    start_barrier = threading.Barrier(2)
+
+    def attempt(operation: str) -> tuple[str, int | None]:
+        with pg_session_factory() as session:
+            engine = DurablePaymentEngine(session)
+            start_barrier.wait(timeout=10)
+
+            try:
+                with transaction_scope(session):
+                    if operation == "cancel":
+                        response = engine.cancel_payment(actor, payment_id)
+                    else:
+                        response = engine.confirm_payment(
+                            actor,
+                            payment_id,
+                            PaymentConfirmRequest(
+                                idempotency_key=f"confirm_race_{uuid4().hex[:12]}"
+                            ),
+                        )
+                return response.status, None
+            except HTTPException as exc:
+                return "CONFLICT", exc.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancel_future = executor.submit(attempt, "cancel")
+        confirm_future = executor.submit(attempt, "confirm")
+        cancel_result = cancel_future.result(timeout=30)
+        confirm_result = confirm_future.result(timeout=30)
+
+    results = [cancel_result, confirm_result]
+    successful = [result for result in results if result[1] is None]
+    rejected = [result for result in results if result[1] is not None]
+
+    assert len(successful) == 1
+    assert len(rejected) == 1
+    assert rejected[0][1] == 409
+
+    with pg_session_factory() as session:
+        final_payment = session.get(Payment, payment_id)
+        account = (
+            session.query(MockAccount)
+            .filter(MockAccount.owner_id == payer_id)
+            .one()
+        )
+        ledger_entries = session.scalars(
+            ledger_entries_for_payment(payment_id)
+        ).all()
+
+        assert final_payment is not None
+
+        if final_payment.status == PaymentStatus.CANCELLED.value:
+            assert account.balance_paise == initial_balance
+            assert len(ledger_entries) == 0
+
+        elif final_payment.status == PaymentStatus.EXECUTED.value:
+            assert account.balance_paise == initial_balance - payment_amount
+            assert len(ledger_entries) == 1
+            assert ledger_entries[0].entry_type == "DEBIT"
+            assert ledger_entries[0].amount_paise == payment_amount
+
+        else:
+            pytest.fail(
+                f"Unexpected final payment state: {final_payment.status}"
+            )
