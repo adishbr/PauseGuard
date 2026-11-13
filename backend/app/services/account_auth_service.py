@@ -137,6 +137,9 @@ class AccountAuthService:
             from app.models.user import RoleBinding, SyntheticUser
 
             self._db.add(SyntheticUser(id=user_id, created_at=current_time))
+            # Flush parent users row before adding child tables that have FK -> users.id
+            # without an ORM relationship (e.g., UserAccount), guaranteeing INSERT order.
+            self._db.flush()
             self._db.add(RoleBinding(user_id=user_id, role=role_enum, created_at=current_time))
             account_row = UserAccount(
                 id=user_id,

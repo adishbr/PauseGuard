@@ -7,10 +7,15 @@ for local mock-mode previews and unit tests without Docker.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 from typing import Any
 from uuid import UUID
+
+
+def as_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to timezone-aware UTC for safe cross-driver comparison."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 @dataclass
