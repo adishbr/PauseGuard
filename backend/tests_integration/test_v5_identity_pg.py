@@ -132,3 +132,12 @@ def test_pg_v5_real_signup_kyc_guardian_invite_and_payment_flow(pg_session_facto
         assert conf.status_code == 200, conf.text
         assert conf.json()["status"] == "EXECUTED"
 
+        # 6. Durable NotificationOutbox persisted in PostgreSQL with strict guardian redaction
+        outbox_res = client.get("/api/v2/notifications/outbox", headers=g_hdr)
+        assert outbox_res.status_code == 200, outbox_res.text
+        outbox_items = outbox_res.json()["items"]
+        assert len(outbox_items) >= 1
+        assert outbox_items[0]["payload"]["redacted"] is True
+        assert "amount_paise" not in outbox_items[0]["payload"]
+        assert "beneficiary_id" not in outbox_items[0]["payload"]
+

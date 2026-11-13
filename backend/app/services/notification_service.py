@@ -214,13 +214,13 @@ class NotificationOutboxService:
                 settings=self._settings,
             )
             if self._db_session is not None:
-                from sqlalchemy import text as sa_text
+                from sqlalchemy import select
                 from app.models.notifications import NotificationOutbox
+                from app.models.user import SyntheticUser
 
-                # Ensure parent users row exists for deterministic test actors if synthetic
+                # Ensure parent users row exists before inserting FK-constrained outbox row
                 exists = self._db_session.execute(
-                    sa_text("SELECT 1 FROM users WHERE id = :uid"),
-                    {"uid": recipient_user_id},
+                    select(SyntheticUser.id).where(SyntheticUser.id == recipient_user_id)
                 ).scalar_one_or_none()
                 if exists is None:
                     continue
