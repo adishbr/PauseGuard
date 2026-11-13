@@ -46,6 +46,7 @@ export function Auth({ path, role, locale, onSession, expired }: {
   const realBackend = isRealBackendMode()
   const showSampleAccess = !signup && !enrollmentReturn && (!realBackend || isLoopbackHost())
   const unsupportedRealSignup = realBackend && signup
+  const provisionedContact = guardian ? 'ravi@pauseguard.test' : 'asha@pauseguard.test'
 
   async function submit(event?: FormEvent, sample = false) {
     event?.preventDefault()
@@ -169,13 +170,13 @@ export function Auth({ path, role, locale, onSession, expired }: {
                   aria-invalid={invalid === 'contact' || undefined}
                   aria-describedby={invalid === 'contact' ? 'contact-help auth-error' : 'contact-help'}
                   onChange={(event) => setContact(event.target.value)}
-                  placeholder={realBackend && !signup ? 'asha@example.test or bearer token' : 'asha@example.test'}
+                  placeholder={realBackend && !signup ? `${provisionedContact} or bearer token` : 'asha@example.test'}
                 />
               </label>
 
               <p className="field-help" id="contact-help">
                 {realBackend && !signup
-                  ? 'Authenticates against FastAPI (/api/v2/demo/session or /api/v2/profile).'
+                  ? `Server-enforced auth via FastAPI (/api/v2/demo/session). Provisioned identity: ${provisionedContact}`
                   : contact && (isEmail || isMobile)
                     ? 'Format looks right. Contact details are not verified in this preview.'
                     : 'Use a fictional email such as asha@example.test.'}
@@ -296,6 +297,15 @@ export function Auth({ path, role, locale, onSession, expired }: {
             <button className="text-button" type="button" disabled={busy} onClick={() => void submit(undefined, true)}>
               {guardian ? 'Open sample guardian' : 'Open sample payer'} <Icon name="arrow" size={16} />
             </button>
+          </div>
+        )}
+
+        {realBackend && form && !unsupportedRealSignup && (
+          <div className="admin-login-meta" style={{ marginTop: '0.85rem' }}>
+            <span className="pill neutral">
+              <Icon name="lock" size={13} /> Provisioned identity: <code>{provisionedContact}</code>
+            </span>
+            <span className="pill neutral">Server-enforced role boundary</span>
           </div>
         )}
       </section>
