@@ -442,6 +442,7 @@ def test_checkout_verification_fails_when_provider_payment_failed(client, mock_c
     assert "not successful" in verify_res.json().get("detail", "")
 
 
+
 # ---------------------------------------------------------------------------
 # 4. Inbound Webhook Tests & Replay Deduplication
 # ---------------------------------------------------------------------------
@@ -457,12 +458,19 @@ def test_webhook_missing_signature_header_rejected(client):
 
 
 def test_webhook_invalid_signature_rejected(client):
-    body = json.dumps({"id": "event_123", "event": "payment.captured"}).encode("utf-8")
+    body = json.dumps(
+        {"id": "event_123", "event": "payment.captured"}
+    ).encode("utf-8")
+
     res = client.post(
         "/api/v2/sandbox/razorpay/webhook",
         content=body,
-        headers={"X-Razorpay-Signature": "invalid_signature", "Content-Type": "application/json"},
+        headers={
+            "X-Razorpay-Signature": "invalid_signature",
+            "Content-Type": "application/json",
+        },
     )
+
     assert res.status_code == 400
     assert "Invalid webhook signature" in res.json().get("detail", "")
 
@@ -484,23 +492,33 @@ def test_webhook_processes_valid_event_and_deduplicates_replay(client):
             }
         },
     }
+
     raw_body = json.dumps(event_payload).encode("utf-8")
     signature = compute_webhook_signature(raw_body)
+
     headers = {
         "X-Razorpay-Signature": signature,
         "Content-Type": "application/json",
     }
 
-    # 1. First event delivery -> processed
-    first_res = client.post("/api/v2/sandbox/razorpay/webhook", content=raw_body, headers=headers)
+    first_res = client.post(
+        "/api/v2/sandbox/razorpay/webhook",
+        content=raw_body,
+        headers=headers,
+    )
+
     assert first_res.status_code == 200
     first_data = first_res.json()
     assert first_data["status"] == "processed"
     assert first_data["event_id"] == "event_webhook_test_001"
     assert first_data["can_authorize_p2p_payment"] is False
 
-    # 2. Replay duplicate delivery -> duplicate
-    second_res = client.post("/api/v2/sandbox/razorpay/webhook", content=raw_body, headers=headers)
+    second_res = client.post(
+        "/api/v2/sandbox/razorpay/webhook",
+        content=raw_body,
+        headers=headers,
+    )
+
     assert second_res.status_code == 200
     second_data = second_res.json()
     assert second_data["status"] == "duplicate"
@@ -508,23 +526,130 @@ def test_webhook_processes_valid_event_and_deduplicates_replay(client):
     assert second_data["can_authorize_p2p_payment"] is False
 
 
+@pytest.mark.parametrize(
+    "raw_body",
+    [
+        b"[]",
+        b'"invalid"',
+        b"123",
+        b"null",
+    ],
+)
+def test_webhook_rejects_non_object_root_json(client, raw_body):
+    signature = compute_webhook_signature(raw_body)
+
+    response = client.post(
+        "/api/v2/sandbox/razorpay/webhook",
+        content=raw_body,
+        headers={
+            "X-Razorpay-Signature": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Webhook JSON payload must be an object"
+    )
+
+
+def test_webhook_rejects_whitespace_only_event_id(client):
+    raw_body = json.dumps({
+        "id": "   ",
+        "event": "payment.captured",
+    }).encode("utf-8")
+
+    signature = compute_webhook_signature(raw_body)
+
+    response = client.post(
+        "/api/v2/sandbox/razorpay/webhook",
+        content=raw_body,
+        headers={
+            "X-Razorpay-Signature": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Webhook event payload missing unique event ID"
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_detail"),
+    [
+        (
+            "invalid",
+            "Webhook payload field must be an object",
+        ),
+        (
+            {"payment": "invalid"},
+            "Webhook payment field must be an object",
+        ),
+        (
+            {"payment": {"entity": "invalid"}},
+            "Webhook payment entity must be an object",
+        ),
+    ],
+)
+def test_webhook_rejects_malformed_nested_structures(
+    client, payload, expected_detail
+):
+    event_payload = {
+        "id": f"event_invalid_structure_{uuid4().hex[:8]}",
+        "event": "payment.captured",
+        "payload": payload,
+    }
+
+    raw_body = json.dumps(event_payload).encode("utf-8")
+    signature = compute_webhook_signature(raw_body)
+
+    response = client.post(
+        "/api/v2/sandbox/razorpay/webhook",
+        content=raw_body,
+        headers={
+            "X-Razorpay-Signature": signature,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == expected_detail
+
+
 def test_webhook_can_never_authorize_p2p_payment(client):
-    """Verify core security boundary: Webhook response strictly declares can_authorize_p2p_payment=False."""
+    """Webhook response must never authorize a P2P payment."""
+
     event_payload = {
         "id": f"event_p2p_check_{uuid4().hex[:8]}",
         "event": "payment.captured",
-        "payload": {"payment": {"entity": {"id": "pay_p2p_guard", "order_id": "ord_p2p"}}},
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_p2p_guard",
+                    "order_id": "ord_p2p",
+                }
+            }
+        },
     }
+
     raw_body = json.dumps(event_payload).encode("utf-8")
     signature = compute_webhook_signature(raw_body)
+
     res = client.post(
         "/api/v2/sandbox/razorpay/webhook",
         content=raw_body,
-        headers={"X-Razorpay-Signature": signature, "Content-Type": "application/json"},
+        headers={
+            "X-Razorpay-Signature": signature,
+            "Content-Type": "application/json",
+        },
     )
+
     assert res.status_code == 200
     data = res.json()
     assert data["can_authorize_p2p_payment"] is False
+
 
 
 # ---------------------------------------------------------------------------
