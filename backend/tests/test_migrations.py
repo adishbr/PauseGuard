@@ -1,6 +1,7 @@
 """Inspect declarations and compile SQL; never invoke migration entry points."""
 
 import ast
+import importlib.util
 from pathlib import Path
 import runpy
 from unittest.mock import Mock
@@ -20,6 +21,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 REVISION_0001 = BACKEND / "migrations/versions/0001_offline_foundation.py"
 REVISION_0002 = BACKEND / "migrations/versions/0002_durable_payment_ledger.py"
 REVISION_0003 = BACKEND / "migrations/versions/0003_razorpay_merchant_sandbox.py"
+REVISION_0004 = BACKEND / "migrations/versions/0004_audit_append_sequence.py"
 
 ALL_MIGRATION_TABLES = [
     "users",
@@ -74,6 +76,12 @@ def declared_schema():
                 assert call.func.attr == "create_index"
                 name, table, columns = args
                 sa.Index(name, *(schema.tables[table].c[column] for column in columns), **kwargs)
+
+    # Apply additive 0004 revision operations to audit_events schema declaration
+    audit_tbl = schema.tables["audit_events"]
+    audit_tbl.append_column(sa.Column("append_seq", sa.BigInteger(), nullable=False))
+    audit_tbl.append_constraint(sa.CheckConstraint("append_seq > 0", name="ck_audit_events_positive_append_seq"))
+    sa.Index("ix_audit_events_append_seq", audit_tbl.c.append_seq, unique=True)
     return schema
 
 
@@ -81,17 +89,66 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0003_razorpay_merchant_sandbox"]
+    assert scripts.get_heads() == ["0004_audit_append_sequence"]
     head = scripts.get_revision("head")
-    assert head.revision == "0003_razorpay_merchant_sandbox"
-    assert head.down_revision == "0002_durable_payment_ledger"
+    assert head.revision == "0004_audit_append_sequence"
+    assert head.down_revision == "0003_razorpay_merchant_sandbox"
+    rev3 = scripts.get_revision("0003_razorpay_merchant_sandbox")
+    assert rev3.down_revision == "0002_durable_payment_ledger"
     rev2 = scripts.get_revision("0002_durable_payment_ledger")
     assert rev2.down_revision == "0001_offline_foundation"
     base = scripts.get_revision("0001_offline_foundation")
     assert base.down_revision is None
     assert base.dependencies is None
     assert base.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 3
+    assert len(list(scripts.walk_revisions())) == 4
+
+
+def test_0004_revision_declares_audit_append_seq_and_validates_backfill():
+    assert REVISION_0004.read_bytes() == (
+        BACKEND / "tests_integration/migrations/versions/0004_audit_append_sequence.py"
+    ).read_bytes()
+    spec = importlib.util.spec_from_file_location("rev_0004", REVISION_0004)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+
+    assert module.revision == "0004_audit_append_sequence"
+    assert module.down_revision == "0003_razorpay_merchant_sandbox"
+
+    reconstruct = module.reconstruct_verified_chain_order
+    assert reconstruct([]) == []
+
+    # Valid out-of-order input rows resolve deterministically by cryptographic links
+    rows = [
+        ("id-3", "h2", "h3"),
+        ("id-1", "0" * 64, "h1"),
+        ("id-2", "h1", "h2"),
+    ]
+    assert reconstruct(rows) == ["id-1", "id-2", "id-3"]
+
+    # Fork (two children sharing same prev_hash) must fail closed
+    with pytest.raises(RuntimeError, match="fork"):
+        reconstruct([
+            ("id-1", "0" * 64, "h1"),
+            ("id-2", "h1", "h2"),
+            ("id-3", "h1", "h3"),
+        ])
+
+    # Cycle must fail closed
+    with pytest.raises(RuntimeError, match="cycle|orphaned|genesis"):
+        reconstruct([
+            ("id-1", "0" * 64, "h1"),
+            ("id-2", "h1", "h2"),
+            ("id-3", "h3", "h3"),
+        ])
+
+    # Orphan / broken predecessor must fail closed
+    with pytest.raises(RuntimeError, match="orphaned"):
+        reconstruct([
+            ("id-1", "0" * 64, "h1"),
+            ("id-2", "missing_parent", "h2"),
+        ])
 
 
 def test_upgrade_and_downgrade_have_only_approved_ordered_operations():

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import threading
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -172,6 +172,7 @@ class PaymentService:
         request: PaymentCreateRequest,
         server_now: Optional[datetime] = None,
         tier: Optional[int] = None,
+        advisory_signals: Optional[Any] = None,
     ) -> FullPaymentView:
         """Create a new risk-evaluated mock payment."""
         if not isinstance(actor, TrustedActorContext) or UserRole.PAYER not in actor.roles:
@@ -218,6 +219,7 @@ class PaymentService:
                 beneficiary_id=request.beneficiary_id,
                 purpose=request.purpose,
                 is_safe_locked=safe_lock_locked,
+                advisory_signals=advisory_signals,
             )
 
             if tier is not None:
@@ -451,18 +453,18 @@ class PaymentService:
     ) -> PaymentConfirmResponse:
         """Confirm final payment execution by the authenticated owning payer."""
         with self._lock:
-            # Check confirmation idempotency first
-            cached_confirm = self._confirm_idempotency_map.get((payment_id, request.idempotency_key))
-            if cached_confirm is not None:
-                return cached_confirm
-
             record = self._payments.get(payment_id)
             if record is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
 
-            # Check owning payer
+            # Check owning payer before idempotency replay so non-payers cannot probe/replay receipts
             if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
                 raise AuthorizationError("Forbidden: Only the authenticated owning payer can execute payment")
+
+            # Check confirmation idempotency
+            cached_confirm = self._confirm_idempotency_map.get((payment_id, request.idempotency_key))
+            if cached_confirm is not None:
+                return cached_confirm
 
             # Reject if already terminal
             if record.status == PaymentStatus.EXECUTED:
@@ -786,6 +788,12 @@ class PaymentService:
                 self._audit_chain.append("SYSTEM_START", {"status": "initialized"})
             valid = self._audit_chain.verify()
             return valid, len(self._audit_chain.records), self._audit_chain.records[-1].record_hash
+
+    def get_payment_payer_id(self, payment_id: str) -> Optional[UUID]:
+        """Resolve the owning payer UUID for internal event routing."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            return record.payer_id if record is not None else None
 
     def get_audit_chain(self):
         """Retrieve mock audit chain for anchoring."""

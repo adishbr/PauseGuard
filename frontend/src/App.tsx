@@ -13,6 +13,7 @@ import { Enrollment } from './pages/Enrollment.tsx'
 import { Help } from './pages/Help.tsx'
 import { Landing } from './pages/Landing.tsx'
 import { accountApi, AccountError, savedSession, saveSession, sessionExpired } from './services/accountApi.ts'
+import { isRealBackendMode } from './services/backendMode.ts'
 import type { DemoProfile, DemoSession } from './types/account.ts'
 import { Guardian } from './pages/Guardian.tsx'
 import { Payer } from './pages/Payer.tsx'
@@ -61,11 +62,13 @@ function Workspace() {
   const t = translator(locale)
   const profile = session?.profile
   const durationKey = `${protectionKey}:${profile?.id}`
-  const reviewDuration = savedDuration?.key === durationKey ? savedDuration.value :
+  const realBackend = isRealBackendMode()
+  const reviewDuration = realBackend ? defaultReviewDuration :
+    savedDuration?.key === durationKey ? savedDuration.value :
     parseReviewDuration(storageRead('localStorage', durationKey) ||
       (profile?.sample ? storageRead('localStorage', protectionKey) : '')) ?? defaultReviewDuration
   const paymentPage = path === dashboard
-  const showProtection = !guardian && !adminPath && (paymentPage || path === '/payer/profile')
+  const showProtection = !realBackend && !guardian && !adminPath && (paymentPage || path === '/payer/profile')
 
   function changeLocale(next: Locale) {
     storageWrite('localStorage', languageKey, next)

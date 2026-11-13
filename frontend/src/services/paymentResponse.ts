@@ -30,8 +30,16 @@ export function parsePayment(value: unknown, role: Role, id?: string) {
   const { amount_paise, beneficiary_id, purpose, risk_score, reason_codes, version } = value
   if (typeof amount_paise !== 'number' || !Number.isSafeInteger(amount_paise) || amount_paise <= 0 ||
       typeof beneficiary_id !== 'string' || !beneficiary_id || typeof purpose !== 'string' || !purpose ||
-      typeof risk_score !== 'number' || !Number.isFinite(risk_score) ||
-      !Array.isArray(reason_codes) || !reason_codes.every((reason) => typeof reason === 'string') ||
+      (risk_score !== undefined && (typeof risk_score !== 'number' || !Number.isFinite(risk_score))) ||
+      (reason_codes !== undefined && (!Array.isArray(reason_codes) || !reason_codes.every((reason) => typeof reason === 'string'))) ||
       typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) return
-  return { ...summary, amount_paise, beneficiary_id, purpose, risk_score, reason_codes, version }
+  return {
+    ...summary,
+    amount_paise,
+    beneficiary_id,
+    purpose,
+    risk_score: typeof risk_score === 'number' ? risk_score : 0,
+    reason_codes: Array.isArray(reason_codes) ? reason_codes : [],
+    version,
+  }
 }

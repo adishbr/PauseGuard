@@ -70,4 +70,8 @@ def ledger_entries_for_payment(payment_id: str) -> Select:
 
 
 def audit_events_for_payment(payment_id: str) -> Select:
-    return select(AuditEvent).where(AuditEvent.payment_id == payment_id).order_by(AuditEvent.created_at)
+    return (
+        select(AuditEvent)
+        .where(AuditEvent.payment_id == payment_id)
+        .order_by(AuditEvent.append_seq.asc(), AuditEvent.created_at.asc())
+    )

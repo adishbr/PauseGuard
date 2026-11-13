@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
+    Sequence,
     String,
     Uuid,
     func,
@@ -21,18 +24,28 @@ from app.models.database import Base
 if TYPE_CHECKING:
     from app.models.payment import Payment
 
+AUDIT_EVENTS_APPEND_SEQ = Sequence(
+    "audit_events_append_seq",
+    start=1,
+    increment=1,
+    metadata=Base.metadata,
+)
+
 
 class AuditEvent(Base):
     """Immutable audit record committed atomically with payment transitions."""
 
     __tablename__ = "audit_events"
     __table_args__ = (
+        CheckConstraint("append_seq > 0", name="ck_audit_events_positive_append_seq"),
+        Index("ix_audit_events_append_seq", "append_seq", unique=True),
         Index("ix_audit_events_payment_id", "payment_id"),
         Index("ix_audit_events_actor_id", "actor_id"),
         Index("ix_audit_events_event_type", "event_type"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    append_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     payment_id: Mapped[Optional[str]] = mapped_column(
         String(64),
         ForeignKey("payments.id", name="fk_audit_events_payment", ondelete="RESTRICT"),

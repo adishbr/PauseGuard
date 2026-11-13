@@ -369,12 +369,14 @@ def test_durable_engine_audit_event_hash_chain():
 
     # First event
     ev1 = engine._append_audit_event("PAYMENT_CREATED", actor, payment_id="pg_001", payload={"test": 1})
+    assert ev1.append_seq == 1
     assert ev1.prev_hash == "0" * 64
     assert len(ev1.event_hash) == 64
 
     # Second event linked to first
     session.query.return_value.order_by.return_value.first.return_value = ev1
     ev2 = engine._append_audit_event("PAYMENT_EXECUTED", actor, payment_id="pg_001", payload={"test": 2})
+    assert ev2.append_seq == 2
     assert ev2.prev_hash == ev1.event_hash
     assert ev2.event_hash != ev1.event_hash
 
@@ -409,13 +411,13 @@ def test_durable_engine_confirm_payment_atomic_flow():
     session.add.side_effect = lambda obj: added_objects.append(obj)
 
     # Mock scalars responses for:
-    # 1. idempotency_record_for_update -> None
-    # 2. payment_for_update -> payment
+    # 1. payment_for_update -> payment (authz check first)
+    # 2. idempotency_record_for_update -> None
     # 3. safe_lock_for_payer_for_update -> safe_lock
     # 4. payer_account_for_update -> account
     session.scalars.return_value.one_or_none.side_effect = [
-        None,        # idempotency check
         payment,     # payment row
+        None,        # idempotency check
         safe_lock,   # safe lock
         account,     # account row
     ]
@@ -470,7 +472,7 @@ def test_durable_engine_confirm_payment_rollback_on_insufficient_balance():
     safe_lock = SafeLockState(payer_id=SYNTHETIC_PAYER_ID, is_locked=False, version=1)
 
     session.scalars.return_value.one_or_none.side_effect = [
-        None, payment, safe_lock, account,
+        payment, None, safe_lock, account,
     ]
 
     engine = DurablePaymentEngine(session)
@@ -1054,7 +1056,8 @@ def test_create_payment_concurrent_integrity_error_handled_safely():
 
     view = engine.create_payment(actor, req)
     assert view.id == "pg_concurrent_idem_001"
-    assert session.rollback.call_count >= 1
+    session.begin_nested.assert_called_once_with()
+    session.rollback.assert_not_called()
 
 
 def test_durable_mode_guard_fails_closed_in_production_without_session_factory():
