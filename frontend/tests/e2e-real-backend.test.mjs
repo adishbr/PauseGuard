@@ -71,8 +71,14 @@ test('E2E Real Backend: Separate payer/guardian sessions, WS notification, redac
   assert.ok(paymentIdMatch, `Expected pg_ payment reference in URL or UI, got ${payer.url()}`)
   paymentId = paymentIdMatch[0]
 
-  // Payer establishes /api/v2/ws connection on active payment screen
-  assert.ok(payerWsUrls.some((u) => u.includes('/api/v2/ws?token=')), 'Expected payer WebSocket connection')
+  // Payer establishes /api/v2/ws connection using single-use ticket (never plaintext token in URL)
+  for (let i = 0; i < 30 && !payerWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_')); i += 1) {
+    await payer.waitForTimeout(100)
+  }
+  assert.ok(
+    payerWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_') && !u.includes('token=')),
+    'Expected payer single-use ticket WebSocket connection',
+  )
 
   // 5. Guardian opens review and sees privacy-redacted view + establishes WS connection
   const openBtn = guardian.getByRole('button', { name: 'Open review' })
@@ -80,7 +86,13 @@ test('E2E Real Backend: Separate payer/guardian sessions, WS notification, redac
   await openBtn.click()
   await guardian.getByRole('heading', { name: 'Review requested' }).waitFor()
 
-  assert.ok(guardianWsUrls.some((u) => u.includes('/api/v2/ws?token=')), 'Expected guardian WebSocket connection')
+  for (let i = 0; i < 30 && !guardianWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_')); i += 1) {
+    await guardian.waitForTimeout(100)
+  }
+  assert.ok(
+    guardianWsUrls.some((u) => u.includes('/api/v2/ws?ticket=pg_ws_') && !u.includes('token=')),
+    'Expected guardian single-use ticket WebSocket connection',
+  )
 
   const guardianText = await guardian.locator('main').innerText()
   assert.doesNotMatch(guardianText, /55,000|Willow Supplies|KYC or verification request/)
