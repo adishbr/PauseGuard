@@ -78,6 +78,8 @@ class GuardianService:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._enrollments: Dict[UUID, EnrollmentRecord] = {}
+        self._backup_enrollments: Dict[UUID, EnrollmentRecord] = {}
+        self._suspended_links: set[tuple[UUID, UUID]] = set()
         self._verified_identities: Dict[UUID, GuardianIdentityEvidence] = {}
         self._seed_default_state()
 
@@ -114,6 +116,8 @@ class GuardianService:
         """Reset repository to default seeded state for isolated test execution."""
         with self._lock:
             self._enrollments.clear()
+            self._backup_enrollments.clear()
+            self._suspended_links.clear()
             self._verified_identities.clear()
             self._seed_default_state()
 
@@ -128,9 +132,26 @@ class GuardianService:
             return None
         with self._lock:
             rec = self._enrollments.get(payer_id)
-            if rec and rec.status == "active":
+            if rec and rec.status == "active" and (payer_id, rec.guardian_id) not in self._suspended_links:
                 return rec.guardian_id
+            backup = self._backup_enrollments.get(payer_id)
+            if backup and backup.status == "active" and (payer_id, backup.guardian_id) not in self._suspended_links:
+                return backup.guardian_id
         return None
+
+    def get_backup_guardian_for_payer(self, payer_id: UUID) -> Optional[UUID]:
+        """Return the authoritative active backup guardian ID for a payer, or None."""
+        if not isinstance(payer_id, UUID):
+            return None
+        with self._lock:
+            backup = self._backup_enrollments.get(payer_id)
+            if backup and backup.status == "active" and (payer_id, backup.guardian_id) not in self._suspended_links:
+                return backup.guardian_id
+        return None
+
+    def is_link_suspended(self, payer_id: UUID, guardian_id: UUID) -> bool:
+        with self._lock:
+            return (payer_id, guardian_id) in self._suspended_links
 
     def is_guardian_verified(self, guardian_id: UUID) -> bool:
         """Check whether a guardian holds valid server-side identity verification.
@@ -308,16 +329,18 @@ class GuardianService:
         guardian_id: UUID,
         relationship: str,
         notification_channel: str,
+        role_slot: str = "primary",
     ) -> None:
         """Sync a verified V5 GuardianInvitation promotion into active runtime guardian state."""
         now_str = datetime.now(timezone.utc).isoformat()
         with self._lock:
+            self._suspended_links.discard((payer_id, guardian_id))
             self._verified_identities[guardian_id] = GuardianIdentityEvidence(
                 guardian_id=guardian_id,
                 is_verified=True,
                 method="trusted_backend_verification",
             )
-            self._enrollments[payer_id] = EnrollmentRecord(
+            record = EnrollmentRecord(
                 enrollment_id=enrollment_id,
                 payer_id=payer_id,
                 guardian_id=guardian_id,
@@ -326,6 +349,10 @@ class GuardianService:
                 status="active",
                 enrolled_at=now_str,
             )
+            if role_slot == "backup":
+                self._backup_enrollments[payer_id] = record
+            else:
+                self._enrollments[payer_id] = record
 
     def clear_invitation_link(
         self,
@@ -338,6 +365,28 @@ class GuardianService:
             rec = self._enrollments.get(payer_id)
             if rec is not None and (guardian_id is None or rec.guardian_id == guardian_id):
                 del self._enrollments[payer_id]
+            backup = self._backup_enrollments.get(payer_id)
+            if backup is not None and (guardian_id is None or backup.guardian_id == guardian_id):
+                del self._backup_enrollments[payer_id]
+
+    def suspend_guardian_link(
+        self,
+        *,
+        payer_id: UUID,
+        guardian_id: Optional[UUID] = None,
+    ) -> None:
+        """Suspend an active guardian link immediately so compromised guardians cannot act."""
+        with self._lock:
+            if guardian_id is not None:
+                self._suspended_links.add((payer_id, guardian_id))
+            rec = self._enrollments.get(payer_id)
+            if rec is not None and (guardian_id is None or rec.guardian_id == guardian_id):
+                self._suspended_links.add((payer_id, rec.guardian_id))
+                rec.status = "suspended"
+            backup = self._backup_enrollments.get(payer_id)
+            if backup is not None and (guardian_id is None or backup.guardian_id == guardian_id):
+                self._suspended_links.add((payer_id, backup.guardian_id))
+                backup.status = "suspended"
 
 
 

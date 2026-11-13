@@ -12,7 +12,7 @@ from app.models.identity import (
     UserSession,
 )
 from app.models.ledger import LedgerEntry
-from app.models.payment import GuardianDecision, Payment
+from app.models.payment import GuardianDecision, Payment, PaymentAppeal
 from app.models.razorpay import RazorpayOrder, RazorpayPayment, RazorpayWebhookEvent
 from app.models.safe_lock import SafeLockState
 from app.models.user import RoleBinding, SyntheticUser, UserRole
@@ -29,6 +29,7 @@ __all__ = [
     "MockAccount",
     "OtpChallenge",
     "Payment",
+    "PaymentAppeal",
     "RazorpayOrder",
     "RazorpayPayment",
     "RazorpayWebhookEvent",
