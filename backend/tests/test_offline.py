@@ -65,7 +65,7 @@ try:
         'notification_outbox',
     }
     expected_routes = {
-        '/api/v2/health', '/api/v2/profile', '/api/v2/demo/session',
+        '/api/v2/health', '/api/v2/metrics', '/api/v2/profile', '/api/v2/demo/session',
         '/api/v2/auth/signup', '/api/v2/auth/otp/challenge', '/api/v2/auth/otp/verify',
         '/api/v2/auth/login', '/api/v2/auth/logout',
         '/api/v2/identity/verify', '/api/v2/identity/status',

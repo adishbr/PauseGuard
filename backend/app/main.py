@@ -1,12 +1,13 @@
 """Run locally with: python -m uvicorn app.main:app --host 127.0.0.1"""
 
+import time
 from uuid import uuid4
 from fastapi import FastAPI, Request
 
 from app.api.account import router as account_router
 from app.api.bank import router as bank_router
 from app.api.guardian import router as guardian_router
-from app.api.health import router as health_router
+from app.api.health import record_http_metric, router as health_router
 from app.api.notifications import router as notifications_router
 from app.api.payments import router as payments_router
 from app.api.policy_lab import router as policy_lab_router
@@ -44,8 +45,13 @@ def create_app(
 
     @application.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
+        started = time.perf_counter()
         correlation_id = request.headers.get("X-Correlation-ID") or f"corr_{uuid4().hex[:16]}"
         response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        route = request.scope.get("route")
+        metric_path = getattr(route, "path", request.url.path)
+        record_http_metric(request.method, str(metric_path), response.status_code, elapsed_ms)
         response.headers["X-Correlation-ID"] = correlation_id
         return response
 
