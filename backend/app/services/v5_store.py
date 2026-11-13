@@ -9,6 +9,7 @@ for local mock-mode previews and unit tests without Docker.
 from dataclasses import dataclass
 from datetime import datetime
 import threading
+from typing import Any
 from uuid import UUID
 
 
@@ -91,6 +92,33 @@ class MockGuardianInvitationRecord:
     updated_at: datetime
 
 
+@dataclass
+class MockWebSocketTicketRecord:
+    ticket_hash: str
+    user_id: UUID
+    roles: tuple[str, ...]
+    expires_at: datetime
+    consumed_at: datetime | None
+    created_at: datetime
+
+
+@dataclass
+class MockNotificationOutboxRecord:
+    id: UUID
+    payment_id: str | None
+    recipient_user_id: UUID
+    recipient_role: str
+    channel: str
+    event_type: str
+    payload_json: dict[str, Any]
+    status: str
+    delivery_provider: str
+    attempts: int
+    last_error: str | None
+    created_at: datetime
+    delivered_at: datetime | None
+
+
 class V5MockIdentityStore:
     """Thread-safe container attached to FastAPI app.state for local mock mode."""
 
@@ -102,6 +130,8 @@ class V5MockIdentityStore:
         self.otp_challenges: dict[UUID, MockOtpChallengeRecord] = {}
         self.sessions_by_token_hash: dict[str, MockUserSessionRecord] = {}
         self.invitations_by_id: dict[UUID, MockGuardianInvitationRecord] = {}
+        self.ws_tickets_by_hash: dict[str, MockWebSocketTicketRecord] = {}
+        self.notification_outbox: list[MockNotificationOutboxRecord] = []
 
 
 def get_or_create_v5_mock_store(app_state: object) -> V5MockIdentityStore:

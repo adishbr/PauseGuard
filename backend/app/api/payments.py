@@ -46,8 +46,10 @@ from app.auth.v5_schemas import (
 from app.config import load_settings
 from app.models.roles import UserRole
 from app.services.events import broadcast_event_sync
+from app.services.notification_service import NotificationOutboxService
 from app.services.payment_guards import TrustedActorContext
 from app.services.payment_service import PaymentService, get_payment_service
+from app.services.v5_store import get_or_create_v5_mock_store
 from intelligence.advisory.adapter import DIAGNOSTIC_TIMEOUT, DIAGNOSTIC_UNHANDLED_EXCEPTION, evaluate_advisory
 from intelligence.advisory.types import AdvisoryRequest, get_default_scoring_config
 from intelligence.schemas.risk_signals import RiskSignals, make_degraded_advisory
@@ -110,6 +112,34 @@ def _evaluate_payment_advisory_bounded(
         )
 
 
+def _record_outbox_events(
+    pending_events: list[dict[str, Any]],
+    *,
+    settings: object,
+    db_session: Session | None,
+    app_state: object,
+) -> None:
+    if not pending_events:
+        return
+    outbox = NotificationOutboxService(
+        settings=settings,
+        db_session=db_session,
+        mock_store=None if db_session is not None else get_or_create_v5_mock_store(app_state),
+    )
+    for ev in pending_events:
+        outbox.record_payment_transition(
+            payment_id=ev["payment_id"],
+            event_type=ev["event_type"],
+            status=ev["status"],
+            payer_id=ev["payer_id"],
+            assigned_guardian_id=ev.get("assigned_guardian_id"),
+            tier=ev.get("tier", 0),
+            amount_paise=ev.get("amount_paise"),
+            guardian_deadline=ev.get("guardian_deadline"),
+            extra=ev.get("extra"),
+        )
+
+
 def get_payment_engine(
     request: Request,
 ) -> Iterator[Any]:
@@ -133,6 +163,12 @@ def get_payment_engine(
         session: Session = session_factory()
         try:
             yield DurablePaymentEngine(session)
+            _record_outbox_events(
+                pending_events,
+                settings=settings,
+                db_session=session,
+                app_state=request.app.state,
+            )
             session.commit()
         except BaseException:
             pending_events.clear()
@@ -155,6 +191,12 @@ def get_payment_engine(
             )
         try:
             yield get_payment_service()
+            _record_outbox_events(
+                pending_events,
+                settings=settings,
+                db_session=None,
+                app_state=request.app.state,
+            )
         except BaseException:
             pending_events.clear()
             raise

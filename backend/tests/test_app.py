@@ -90,6 +90,8 @@ CANONICAL_V2_ROUTES = {
     "/api/v2/sandbox/razorpay/verify",
     "/api/v2/sandbox/razorpay/webhook",
     "/api/v2/sandbox/razorpay/orders/{order_id}",
+    "/api/v2/ws/ticket",
+    "/api/v2/notifications/outbox",
 }
 
 
