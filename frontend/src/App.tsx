@@ -3,6 +3,7 @@ import { defaultReviewDuration, parseReviewDuration } from '../mocks/reviewPrefe
 import type { ReviewDuration } from '../mocks/reviewPreference.ts'
 import { ProtectionSettings } from './components/ProtectionSettings.tsx'
 import { Icon } from './components/Icon.tsx'
+import { ThemeToggle } from './components/ThemeToggle.tsx'
 import { isLocale, languages, translator } from './locales/messages.ts'
 import type { Locale } from './locales/messages.ts'
 import { Account } from './pages/Account.tsx'
@@ -199,6 +200,8 @@ function Workspace() {
             )}
 
             {!isAuth && <span className="demo-badge"><span />{adminPath ? 'Test mode' : 'Preview'}</span>}
+
+            <ThemeToggle compact />
 
             {!adminPath && (
               <label className="locale-control">

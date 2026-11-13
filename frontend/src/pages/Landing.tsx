@@ -1,4 +1,5 @@
 import { Icon } from '../components/Icon.tsx'
+import { ThemeToggle } from '../components/ThemeToggle.tsx'
 import { WovenLock } from '../components/WovenLock.tsx'
 import { Help } from './Help.tsx'
 import './Landing.css'
@@ -22,6 +23,7 @@ export function Landing({ help }: { help: boolean }) {
             <a href="/guardian/login">Guardian portal</a>
           </nav>
           <div className="landing-entry">
+            <ThemeToggle />
             <a className="landing-login" href="/payer/login">Log in</a>
             <a className="landing-button" href="/payer/signup">Get started <Icon name="arrow" size={15} /></a>
           </div>

@@ -1254,3 +1254,156 @@ input::placeholder { color: var(--muted-dark); }
   .admin-razorpay-fields { grid-template-columns: 1fr; }
   .admin-login-header { flex-direction: column; }
 }
+
+/* ==========================================================================
+   Theme Toggle & Light Theme Refinements
+   ========================================================================== */
+.theme-toggle-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.theme-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  padding: .4rem .75rem;
+  border-radius: 99rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: .84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 160ms ease;
+  user-select: none;
+}
+.theme-toggle-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--brand-line);
+}
+.theme-toggle-container.compact .theme-toggle-btn {
+  padding: .4rem .55rem;
+}
+.theme-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--brand-accent);
+}
+.theme-toggle-label {
+  font-size: .82rem;
+}
+.theme-toggle-arrow {
+  font-size: .7rem;
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+.theme-toggle-btn[aria-expanded='true'] .theme-toggle-arrow {
+  transform: rotate(180deg);
+}
+.theme-toggle-dropdown {
+  position: absolute;
+  top: calc(100% + .4rem);
+  right: 0;
+  z-index: 100;
+  min-width: 8.5rem;
+  padding: .35rem;
+  border-radius: .75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-elevated);
+  backdrop-filter: blur(1rem);
+  -webkit-backdrop-filter: blur(1rem);
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  animation: panel-in 140ms ease-out both;
+}
+.theme-option-btn {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .45rem .65rem;
+  border-radius: .5rem;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition: all 140ms ease;
+  width: 100%;
+}
+.theme-option-btn:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.theme-option-btn.selected {
+  background: var(--brand-tint);
+  color: var(--brand-accent);
+  font-weight: 650;
+}
+
+/* Light Theme Component Tweaks */
+html[data-theme='light'] .site-header {
+  background: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid var(--border);
+}
+html[data-theme='light'] .card,
+html[data-theme='light'] .glass-surface {
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.9), 0 14px 34px -8px rgba(15, 23, 42, 0.08);
+}
+html[data-theme='light'] .intro h1 em {
+  color: var(--brand-accent);
+}
+html[data-theme='light'] .intro-mark {
+  background: radial-gradient(circle, #e0e7ff 0%, #ede9fe 55%, transparent 72%);
+}
+html[data-theme='light'] .field-box,
+html[data-theme='light'] .admin-input {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+html[data-theme='light'] .field-box:focus-within,
+html[data-theme='light'] .admin-input:focus {
+  border-color: var(--brand-accent);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+html[data-theme='light'] .primary-button {
+  background: var(--brand-accent);
+  color: #ffffff;
+}
+html[data-theme='light'] .primary-button:hover:not(:disabled) {
+  background: var(--brand-accent-hover);
+}
+html[data-theme='light'] .secondary-button,
+html[data-theme='light'] .secondary {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+html[data-theme='light'] .secondary-button:hover:not(:disabled),
+html[data-theme='light'] .secondary:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+html[data-theme='light'] .text-button {
+  color: #64748b;
+}
+html[data-theme='light'] .text-button:hover:not(:disabled) {
+  color: #0f172a;
+}
+html[data-theme='light'] .nav-tab {
+  color: #64748b;
+}
+html[data-theme='light'] .nav-tab:hover {
+  color: #0f172a;
+}
+html[data-theme='light'] .nav-tab[aria-current='page'] {
+  color: var(--brand-accent);
+  background: var(--brand-tint);
+}
+
