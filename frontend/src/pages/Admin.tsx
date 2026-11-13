@@ -11,10 +11,15 @@ import {
   AdminApiError,
   loadRazorpayCheckoutScript,
   paymentError,
+  policyLabApi,
   razorpayApi,
   validateRazorpayTestKey,
 } from '../services/adminApi.ts'
-import type { RazorpayOrderResult, RazorpayVerifyResult } from '../services/adminApi.ts'
+import type {
+  PolicyLabSimulationResult,
+  RazorpayOrderResult,
+  RazorpayVerifyResult,
+} from '../services/adminApi.ts'
 import { decimalRupees, formatRupees, toPaise } from '../services/demoSession.ts'
 import type { DemoSession } from '../types/account.ts'
 import { razorpayRequiredEndpoints } from '../types/admin.ts'
@@ -1219,6 +1224,160 @@ function RazorpayPanel({
   )
 }
 
+// ─── Mode C: Policy Lab Simulation ───────────────────────────────────────────
+
+function PolicyLabPanel({ token }: { token: string }) {
+  const [sampleSize, setSampleSize] = useState(120)
+  const [seed, setSeed] = useState(42)
+  const [baselineRupees, setBaselineRupees] = useState(50000)
+  const [personalDeviation, setPersonalDeviation] = useState(5.0)
+  const [businessDeviation, setBusinessDeviation] = useState(10.0)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [report, setReport] = useState<PolicyLabSimulationResult | null>(null)
+
+  async function runSimulation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const res = await policyLabApi.simulate(token, {
+        sample_size: sampleSize,
+        seed,
+        baseline_a_threshold_paise: Math.max(100, Math.round(baselineRupees * 100)),
+        personal_deviation_threshold: personalDeviation,
+        business_deviation_threshold: businessDeviation,
+      })
+      setReport(res)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to run Policy Lab benchmark.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="admin-panel-content">
+      <div className="panel-section-head">
+        <div>
+          <p className="eyebrow">Mode C · Synthetic Held-Out Policy Lab</p>
+          <h2>Threshold Calibration &amp; Friction Benchmarking</h2>
+        </div>
+        <span className="pill neutral">Held-Out Test Split · Synthetic Data</span>
+      </div>
+
+      <form className="policy-lab-form" onSubmit={runSimulation}>
+        <div className="form-row">
+          <label>
+            Sample size
+            <input
+              type="number"
+              min={12}
+              max={500}
+              value={sampleSize}
+              onChange={(e) => setSampleSize(Number(e.target.value) || 60)}
+            />
+          </label>
+          <label>
+            Random seed
+            <input
+              type="number"
+              min={0}
+              value={seed}
+              onChange={(e) => setSeed(Number(e.target.value) || 0)}
+            />
+          </label>
+          <label>
+            Baseline A threshold (INR)
+            <input
+              type="number"
+              min={100}
+              value={baselineRupees}
+              onChange={(e) => setBaselineRupees(Number(e.target.value) || 10000)}
+            />
+          </label>
+          <label>
+            Personal deviation (x)
+            <input
+              type="number"
+              step={0.5}
+              min={2}
+              max={20}
+              value={personalDeviation}
+              onChange={(e) => setPersonalDeviation(Number(e.target.value) || 5)}
+            />
+          </label>
+          <label>
+            Business deviation (x)
+            <input
+              type="number"
+              step={0.5}
+              min={3}
+              max={30}
+              value={businessDeviation}
+              onChange={(e) => setBusinessDeviation(Number(e.target.value) || 10)}
+            />
+          </label>
+        </div>
+
+        {error && (
+          <div className="notice" role="alert">
+            <p>{error}</p>
+          </div>
+        )}
+
+        <div className="actions">
+          <button type="submit" className="primary" disabled={busy}>
+            <Icon name="activity" size={16} />
+            <span>{busy ? 'Running simulation...' : 'Run Policy Lab Simulation'}</span>
+          </button>
+        </div>
+      </form>
+
+      {report && (
+        <div className="detail-panel" aria-label="Policy Lab Report">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>Evaluated {report.total_scenarios_evaluated} held-out test scenarios</strong>
+            <span className="pill mint">{report.evaluation_latency_ms} ms</span>
+          </div>
+          <p className="field-help">{report.declaration}</p>
+          <div className="policy-metrics-grid">
+            {Object.values(report.policy_metrics).map((m) => (
+              <div key={m.policy_name} className="metric-card">
+                <strong>{m.policy_name}</strong>
+                <p>Precision: {m.precision.rate !== null ? `${Math.round(m.precision.rate * 100)}%` : 'N/A'}</p>
+                <p>Recall: {m.recall.rate !== null ? `${Math.round(m.recall.rate * 100)}%` : 'N/A'}</p>
+                <p>Business Disruption: {m.business_disruption_rate.rate !== null ? `${Math.round(m.business_disruption_rate.rate * 100)}%` : 'N/A'}</p>
+                <p>Friction Cost Score: {m.friction_cost_score ?? 0}</p>
+              </div>
+            ))}
+          </div>
+          {report.scam_category_breakdown && (
+            <div>
+              <strong>Scam Category Breakdown</strong>
+              <ul className="audit-list">
+                {Object.entries(report.scam_category_breakdown).map(([cat, info]) => (
+                  <li key={cat} className="audit-item">
+                    <code>{cat}</code>
+                    <span>
+                      Total: {info.total} · Policy C catch rate:{' '}
+                      {info.policies['Policy C (Profile-Aware PauseGuard)']?.flag_rate !== null &&
+                      info.policies['Policy C (Profile-Aware PauseGuard)']?.flag_rate !== undefined
+                        ? `${Math.round((info.policies['Policy C (Profile-Aware PauseGuard)'].flag_rate ?? 0) * 100)}%`
+                        : 'N/A'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
 
 export function Admin({ token, accountId }: {
@@ -1279,17 +1438,38 @@ export function Admin({ token, accountId }: {
                 : 'TEST ONLY'}
           </span>
         </button>
+        <button
+          role="tab"
+          id="tab-policy-lab"
+          type="button"
+          aria-selected={mode === 'policy-lab'}
+          aria-controls="panel-admin-mode"
+          className={`admin-tab${mode === 'policy-lab' ? ' admin-tab-active' : ''}`}
+          onClick={() => setMode('policy-lab')}
+        >
+          <Icon name="shieldAlert" size={16} />
+          <span>Mode C — Policy Lab</span>
+          <span className="pill neutral">Synthetic Lab</span>
+        </button>
       </div>
 
       <div
         id="panel-admin-mode"
         className="card workspace-card admin-panel-card"
         role="tabpanel"
-        aria-labelledby={mode === 'mock-upi' ? 'tab-mock-upi' : 'tab-razorpay'}
+        aria-labelledby={
+          mode === 'mock-upi'
+            ? 'tab-mock-upi'
+            : mode === 'razorpay'
+              ? 'tab-razorpay'
+              : 'tab-policy-lab'
+        }
       >
         {mode === 'mock-upi'
           ? <MockUpiPanel token={token} accountId={accountId} />
-          : <RazorpayPanel token={token} accountId={accountId} onStatusChange={handleRazorpayStatusChange} />}
+          : mode === 'razorpay'
+            ? <RazorpayPanel token={token} accountId={accountId} onStatusChange={handleRazorpayStatusChange} />
+            : <PolicyLabPanel token={token} />}
       </div>
     </div>
   )

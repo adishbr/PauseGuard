@@ -59,20 +59,33 @@ try:
     from app.models.metadata import metadata
     assert set(metadata.tables) == {
         'users', 'role_bindings', 'accounts', 'safe_lock_states',
-        'payments', 'guardian_decisions', 'ledger_entries', 'audit_events', 'idempotency_records',
+        'payments', 'payment_appeals', 'guardian_decisions', 'ledger_entries', 'audit_events', 'idempotency_records',
         'razorpay_orders', 'razorpay_payments', 'razorpay_webhook_events',
+        'user_accounts', 'identity_assurances', 'otp_challenges', 'user_sessions', 'guardian_invitations',
+        'notification_outbox',
     }
     expected_routes = {
         '/api/v2/health', '/api/v2/profile', '/api/v2/demo/session',
+        '/api/v2/auth/signup', '/api/v2/auth/otp/challenge', '/api/v2/auth/otp/verify',
+        '/api/v2/auth/login', '/api/v2/auth/logout',
+        '/api/v2/identity/verify', '/api/v2/identity/status',
         '/api/v2/guardian/enroll', '/api/v2/guardian/status', '/api/v2/guardian/dashboard', '/api/v2/guardian/revoke',
+        '/api/v2/guardian/invitations', '/api/v2/guardian/invitations/{invitation_id}/accept',
+        '/api/v2/guardian/invitations/{invitation_id}/decline', '/api/v2/guardian/invitations/{invitation_id}/revoke',
+        '/api/v2/guardian/invitations/{invitation_id}/suspend',
         '/api/v2/guardian/calls/{call_id}/status', '/api/v2/guardian/calls/provider-callback',
         '/api/v2/payments', '/api/v2/payments/{payment_id}',
         '/api/v2/payments/{payment_id}/events',
         '/api/v2/payments/{payment_id}/risk',
         '/api/v2/payments/{payment_id}/evidence',
         '/api/v2/payments/{payment_id}/warning/acknowledge',
+        '/api/v2/payments/{payment_id}/step-up/verify',
         '/api/v2/payments/{payment_id}/guardian/decision',
         '/api/v2/payments/{payment_id}/fallback/activate',
+        '/api/v2/payments/{payment_id}/fallback/backup',
+        '/api/v2/payments/{payment_id}/appeals',
+        '/api/v2/payments/{payment_id}/appeals/{appeal_id}/resolve',
+        '/api/v2/payments/{payment_id}/retry',
         '/api/v2/payments/{payment_id}/cancel',
         '/api/v2/payments/{payment_id}/confirm',
         '/api/v2/account/balance',
@@ -90,6 +103,10 @@ try:
         '/api/v2/sandbox/razorpay/verify',
         '/api/v2/sandbox/razorpay/webhook',
         '/api/v2/sandbox/razorpay/orders/{order_id}',
+        '/api/v2/ws/ticket',
+        '/api/v2/notifications/outbox',
+        '/api/v2/bank/intents',
+        '/api/v2/bank/webhooks/settlement',
     }
     assert set(app.openapi()['paths']) == expected_routes
     print('guarded cold import passed')

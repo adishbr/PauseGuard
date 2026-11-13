@@ -137,6 +137,7 @@ class PolicyEvaluationMetrics:
     business_cohort: ProfileCohortBreakdown
     business_disruption_rate: MetricRate
     unavailable_metrics: dict[str, UnavailableMetricDetail]
+    friction_cost_score: float = 0.0
     is_synthetic: bool = True
     synthetic_caveat: str = (
         "Synthetic lab evaluation only. Metrics derived from synthetic test fixtures "
@@ -156,6 +157,7 @@ class PolicyEvaluationMetrics:
             "personal_cohort": self.personal_cohort.to_dict(),
             "business_cohort": self.business_cohort.to_dict(),
             "business_disruption_rate": self.business_disruption_rate.to_dict(),
+            "friction_cost_score": self.friction_cost_score,
             "unavailable_metrics": {
                 k: v.to_dict() for k, v in self.unavailable_metrics.items()
             },
@@ -200,6 +202,7 @@ def calculate_evaluation_metrics(
     predictions: list[bool],
     ground_truth_labels: list[str],
     profile_types: list[str],
+    tiers: Optional[list[int]] = None,
 ) -> PolicyEvaluationMetrics:
     """Calculate complete policy evaluation metrics safely.
 
@@ -294,6 +297,18 @@ def calculate_evaluation_metrics(
         denominator=business_legit_total,
     )
 
+    # Deterministic synthetic friction cost heuristic combining false positive disruption & tier escalation weights.
+    tier_penalty = 0.0
+    if tiers is not None and len(tiers) == n:
+        for t in tiers:
+            if t >= 3:
+                tier_penalty += 1.5
+            elif t == 2:
+                tier_penalty += 0.75
+            elif t == 1:
+                tier_penalty += 0.25
+    friction_cost_score = round((fp * 2.0 + tier_penalty) / max(1, n), 4)
+
     return PolicyEvaluationMetrics(
         policy_name=policy_name,
         total_scenarios=n,
@@ -306,6 +321,7 @@ def calculate_evaluation_metrics(
         personal_cohort=personal_cohort,
         business_cohort=business_cohort,
         business_disruption_rate=business_disruption_rate,
+        friction_cost_score=friction_cost_score,
         unavailable_metrics=get_standard_unavailable_metrics(),
         is_synthetic=True,
     )

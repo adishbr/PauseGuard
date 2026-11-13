@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from app.api.payments import get_payment_engine
+from app.api.v5_auth import get_v5_context
 from app.auth.dependencies import get_current_actor
 from app.auth.schemas import (
     CallCallbackRequest,
@@ -24,8 +25,16 @@ from app.auth.schemas import (
     GuardianRevokeResponse,
     GuardianStatusResponse,
 )
+from app.auth.v5_schemas import (
+    GuardianInvitationAcceptRequest,
+    GuardianInvitationCreateRequest,
+    GuardianInvitationListResponse,
+    GuardianInvitationSuspendRequest,
+    GuardianInvitationView,
+)
 from app.config import load_settings
 from app.models.roles import UserRole
+from app.services.guardian_invitation_service import GuardianInvitationService
 from app.services.guardian_service import get_guardian_service
 from app.services.payment_guards import TrustedActorContext
 from app.services.telephony_service import get_telephony_service
@@ -51,8 +60,54 @@ def enroll_guardian(
 @router.get("/status", response_model=GuardianStatusResponse)
 def get_guardian_status(
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
 ) -> GuardianStatusResponse:
     """Retrieve guardian enrollment status for the authenticated actor."""
+    db_session = ctx.get("db_session")
+    if db_session is not None:
+        from app.models.identity import GuardianInvitation
+
+        if UserRole.PAYER in actor.roles:
+            inv = (
+                db_session.query(GuardianInvitation)
+                .filter(
+                    GuardianInvitation.payer_id == actor.user_id,
+                    GuardianInvitation.status == "ACTIVE",
+                    GuardianInvitation.guardian_user_id.isnot(None),
+                )
+                .order_by(GuardianInvitation.role_slot.asc())
+                .first()
+            )
+            if inv is not None and inv.guardian_user_id is not None:
+                return GuardianStatusResponse(
+                    has_guardian=True,
+                    enrollment=GuardianEnrollResponse(
+                        enrollment_id=str(inv.id),
+                        payer_id=inv.payer_id,
+                        guardian_id=inv.guardian_user_id,
+                        relationship=inv.relationship_label,
+                        notification_channel=inv.notification_channel,
+                        status="active",
+                        enrolled_at=(inv.accepted_at or inv.created_at).isoformat(),
+                    ),
+                    guarded_payers=[],
+                )
+        if UserRole.GUARDIAN in actor.roles:
+            invs = (
+                db_session.query(GuardianInvitation)
+                .filter(
+                    GuardianInvitation.guardian_user_id == actor.user_id,
+                    GuardianInvitation.status == "ACTIVE",
+                )
+                .all()
+            )
+            if invs:
+                return GuardianStatusResponse(
+                    has_guardian=True,
+                    enrollment=None,
+                    guarded_payers=[inv.payer_id for inv in invs],
+                )
+
     service = get_guardian_service()
     return service.get_status(actor)
 
@@ -61,6 +116,7 @@ def get_guardian_status(
 def get_guardian_dashboard(
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     engine: Annotated[Any, Depends(get_payment_engine)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
 ) -> GuardianDashboardResponse:
     """Retrieve dashboard summary for an enrolled guardian."""
     if UserRole.GUARDIAN not in actor.roles and UserRole.ADMIN not in actor.roles:
@@ -70,6 +126,19 @@ def get_guardian_dashboard(
         )
     service = get_guardian_service()
     active_count = service.count_active_guardianships(actor.user_id)
+    db_session = ctx.get("db_session")
+    if db_session is not None:
+        from app.models.identity import GuardianInvitation
+
+        db_active = (
+            db_session.query(GuardianInvitation)
+            .filter(
+                GuardianInvitation.guardian_user_id == actor.user_id,
+                GuardianInvitation.status == "ACTIVE",
+            )
+            .count()
+        )
+        active_count = max(active_count, db_active)
     pending_reviews = engine.get_guardian_pending_reviews(actor.user_id)
     return GuardianDashboardResponse(
         guardian_id=actor.user_id,
@@ -77,6 +146,95 @@ def get_guardian_dashboard(
         pending_reviews_count=len(pending_reviews),
         pending_reviews=pending_reviews,
     )
+
+
+@router.post("/invitations", response_model=GuardianInvitationView, status_code=status.HTTP_201_CREATED)
+def create_guardian_invitation(
+    payload: GuardianInvitationCreateRequest,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Create a durable guardian invitation with server-side invite token hashing."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.create_invitation(
+        payer=actor,
+        guardian_email=payload.guardian_email,
+        relationship=payload.relationship,
+        role_slot=payload.role_slot,
+        notification_channel=payload.notification_channel,
+    )
+    return GuardianInvitationView(**res)
+
+
+@router.get("/invitations", response_model=GuardianInvitationListResponse)
+def list_guardian_invitations(
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationListResponse:
+    """List guardian invitations sent by or addressed to the authenticated actor."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.list_invitations(actor=actor)
+    return GuardianInvitationListResponse(
+        sent=[GuardianInvitationView(**item) for item in res["sent"]],
+        received=[GuardianInvitationView(**item) for item in res["received"]],
+    )
+
+
+@router.post("/invitations/{invitation_id}/accept", response_model=GuardianInvitationView)
+def accept_guardian_invitation(
+    invitation_id: UUID,
+    payload: GuardianInvitationAcceptRequest,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Accept guardian invitation after OTP, independent IdentityAssurance, collusion check, and consent."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.accept_invitation(
+        guardian=actor,
+        invitation_id=invitation_id,
+        invite_token=payload.invite_token,
+        otp_challenge_id=payload.otp_challenge_id,
+        otp_code=payload.otp_code,
+        explicit_consent=payload.explicit_consent,
+    )
+    return GuardianInvitationView(**res)
+
+
+@router.post("/invitations/{invitation_id}/decline", response_model=GuardianInvitationView)
+def decline_guardian_invitation(
+    invitation_id: UUID,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Guardian declines an active or pending guardian invitation."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.decline_invitation(guardian=actor, invitation_id=invitation_id)
+    return GuardianInvitationView(**res)
+
+
+@router.post("/invitations/{invitation_id}/revoke", response_model=GuardianInvitationView)
+def revoke_guardian_invitation(
+    invitation_id: UUID,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Payer or guardian revokes a guardian invitation or active guardianship link."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.revoke_invitation(actor=actor, invitation_id=invitation_id)
+    return GuardianInvitationView(**res)
+
+
+@router.post("/invitations/{invitation_id}/suspend", response_model=GuardianInvitationView)
+def suspend_guardian_invitation(
+    invitation_id: UUID,
+    payload: GuardianInvitationSuspendRequest,
+    actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
+    ctx: Annotated[dict[str, Any], Depends(get_v5_context)],
+) -> GuardianInvitationView:
+    """Immediately suspend a potentially compromised guardian link (payer, analyst, or admin)."""
+    svc = GuardianInvitationService(**ctx)
+    res = svc.suspend_invitation(actor=actor, invitation_id=invitation_id, reason=payload.reason)
+    return GuardianInvitationView(**res)
 
 
 

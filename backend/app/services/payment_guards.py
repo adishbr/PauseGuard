@@ -8,10 +8,17 @@ No function mutates a payment, account or session.
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+import hashlib
 from types import MappingProxyType
 from uuid import UUID
 
 from app.models.roles import UserRole
+
+
+def compute_approval_snapshot_hash(payment_id: str, beneficiary_id: str, amount_paise: int) -> str:
+    """Compute immutable digest binding guardian approval to exact payee and paise amount."""
+    canonical = f"{payment_id}:{beneficiary_id}:{amount_paise}".encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class PaymentStatus(StrEnum):

@@ -105,6 +105,8 @@ class FullPaymentView(BaseModel):
     guardian_deadline: str | None = None
     assigned_guardian_id: str | None = None
     version: int = Field(..., gt=0)
+    parent_payment_id: str | None = None
+    step_up_verified: bool = False
 
 
 class PaymentCreateRequest(BaseModel):
@@ -398,6 +400,8 @@ class PolicyLabSimulateRequest(BaseModel):
     sample_size: int = Field(60, ge=10, le=500)
     seed: int = Field(42, ge=0)
     baseline_a_threshold_paise: int = Field(5000000, gt=0)
+    personal_deviation_threshold: float = Field(5.0, ge=2.0, le=20.0)
+    business_deviation_threshold: float = Field(10.0, ge=3.0, le=30.0)
 
 
 class GuardianDashboardResponse(BaseModel):

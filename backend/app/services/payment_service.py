@@ -61,11 +61,22 @@ from app.auth.schemas import (
     PaymentWarningAckResponse,
     RedactedPaymentView,
 )
+from app.auth.v5_schemas import (
+    BackupGuardianActivateResponse,
+    PaymentAppealCreateRequest,
+    PaymentAppealResolveRequest,
+    PaymentAppealView,
+    PaymentRetryRequest,
+    PaymentStepUpRequest,
+    PaymentStepUpResponse,
+    PaymentUpdateRequest,
+)
 from app.models.roles import UserRole
 from app.services.payment_guards import (
     PaymentGuardError,
     PaymentStatus,
     TrustedActorContext,
+    compute_approval_snapshot_hash,
     guardian_approval_target,
     guardian_timeout_target,
     require_payer_confirmation_preconditions,
@@ -97,6 +108,12 @@ class PaymentRecord:
     decision_notes: Optional[str] = None
     fallback_activated_at: Optional[str] = None
     confirmed_at: Optional[str] = None
+    approved_beneficiary_id: Optional[str] = None
+    approved_amount_paise: Optional[int] = None
+    approval_snapshot_hash: Optional[str] = None
+    parent_payment_id: Optional[str] = None
+    step_up_verified_at: Optional[str] = None
+    reason_codes: Optional[list[str]] = None
 
 
 DEFAULT_MOCK_BALANCE_PAISE = 100000000  # ₹1,000,000 default mock balance
@@ -116,6 +133,7 @@ class PaymentService:
         self._accounts: Dict[UUID, int] = {}
         self._ledger_entries: list[dict] = []
         self._confirm_idempotency_map: Dict[tuple[str, str], PaymentConfirmResponse] = {}
+        self._appeals: Dict[UUID, dict[str, Any]] = {}
 
     def reset_for_testing(self) -> None:
         """Reset repository state for isolated test execution."""
@@ -128,6 +146,20 @@ class PaymentService:
             self._accounts.clear()
             self._ledger_entries.clear()
             self._confirm_idempotency_map.clear()
+            self._appeals.clear()
+
+    def ensure_user_initialized(
+        self,
+        user_id: UUID,
+        *,
+        balance_paise: int = DEFAULT_MOCK_BALANCE_PAISE,
+    ) -> None:
+        """Initialize mock account balance and Safe-Lock state for a newly signed-up V5 user."""
+        with self._lock:
+            if user_id not in self._accounts:
+                self._accounts[user_id] = balance_paise
+            if user_id not in self._safe_lock_states:
+                self._safe_lock_states[user_id] = False
 
     def get_account_balance(self, user_id: UUID) -> int:
         """Retrieve current mock account balance in paise."""
@@ -344,6 +376,11 @@ class PaymentService:
                 assigned_guardian_id=record.assigned_guardian_id,
                 payer_id=record.payer_id,
             )
+            from app.services.guardian_service import get_guardian_service
+            if get_guardian_service().is_link_suspended(record.payer_id, actor.user_id):
+                raise AuthorizationError(
+                    "Forbidden: Guardian link is suspended due to security review and cannot approve or inspect payments."
+                )
 
             # Reject duplicate/replayed decisions
             if record.status != PaymentStatus.AWAITING_GUARDIAN:
@@ -378,6 +415,11 @@ class PaymentService:
 
                 assert_guardian_cannot_execute(target_state=target_status.value)
                 record.status = target_status
+                record.approved_beneficiary_id = record.beneficiary_id
+                record.approved_amount_paise = record.amount_paise
+                record.approval_snapshot_hash = compute_approval_snapshot_hash(
+                    record.id, record.beneficiary_id, record.amount_paise
+                )
                 decision_label = "APPROVED"
             else:
                 record.status = PaymentStatus.REJECTED
@@ -497,6 +539,20 @@ class PaymentService:
                 )
             except PaymentGuardError as e:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+            if record.tier == 3 and record.approval_snapshot_hash is not None:
+                expected_hash = compute_approval_snapshot_hash(
+                    record.id, record.beneficiary_id, record.amount_paise
+                )
+                if (
+                    record.approved_beneficiary_id != record.beneficiary_id
+                    or record.approved_amount_paise != record.amount_paise
+                    or record.approval_snapshot_hash != expected_hash
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Guardian approval snapshot invalidated by payment modification; re-verification required",
+                    )
 
             # Mock account balance check
             balance = self._accounts.get(record.payer_id, DEFAULT_MOCK_BALANCE_PAISE)
@@ -803,6 +859,302 @@ class PaymentService:
                 self._audit_chain = AuditChain()
                 self._audit_chain.append("SYSTEM_START", {"status": "initialized"})
             return self._audit_chain
+
+    def _build_full_view_from_record(self, record: PaymentRecord) -> FullPaymentView:
+        return FullPaymentView(
+            id=record.id,
+            status=record.status.value,
+            tier=record.tier,
+            amount_paise=record.amount_paise,
+            beneficiary_id=record.beneficiary_id,
+            purpose=record.purpose,
+            guardian_deadline=record.guardian_deadline.isoformat() if record.guardian_deadline else None,
+            assigned_guardian_id=str(record.assigned_guardian_id) if record.assigned_guardian_id else None,
+            version=record.version,
+            parent_payment_id=record.parent_payment_id,
+            step_up_verified=record.step_up_verified_at is not None,
+        )
+
+    def update_payment(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+        request: PaymentUpdateRequest,
+    ) -> FullPaymentView:
+        """Modify non-terminal payment fields; invalidates any prior guardian approval on payee/amount edit."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can modify a pending payment")
+            if record.status in (
+                PaymentStatus.EXECUTED,
+                PaymentStatus.REJECTED,
+                PaymentStatus.CANCELLED,
+                PaymentStatus.EXPIRED,
+                PaymentStatus.FAILED,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Cannot modify terminal payment in state {record.status.value}",
+                )
+
+            new_ben = request.beneficiary_id.strip() if request.beneficiary_id else record.beneficiary_id
+            new_amt = request.amount_paise if request.amount_paise is not None else record.amount_paise
+            new_purpose = request.purpose.strip() if request.purpose else record.purpose
+            material_changed = (new_ben != record.beneficiary_id) or (new_amt != record.amount_paise)
+
+            record.beneficiary_id = new_ben
+            record.amount_paise = new_amt
+            record.purpose = new_purpose
+
+            policy_res = evaluate_payment_policy(
+                payer_id=actor.user_id,
+                amount_paise=record.amount_paise,
+                beneficiary_id=record.beneficiary_id,
+                purpose=record.purpose,
+                is_safe_locked=False,
+            )
+            now = datetime.now(timezone.utc)
+            if policy_res.is_hard_blocked:
+                record.status = PaymentStatus.REJECTED
+                record.approved_beneficiary_id = None
+                record.approved_amount_paise = None
+                record.approval_snapshot_hash = None
+            elif material_changed and (
+                record.approval_snapshot_hash is not None
+                or record.tier == 3
+                or policy_res.requires_guardian
+            ):
+                authoritative_guardian = get_authoritative_guardian_for_payer(actor.user_id)
+                if authoritative_guardian is None:
+                    raise GuardianAssignmentError(
+                        "Payment modification invalidates prior approval and requires an active guardian"
+                    )
+                record.assigned_guardian_id = authoritative_guardian
+                record.approved_beneficiary_id = None
+                record.approved_amount_paise = None
+                record.approval_snapshot_hash = None
+                record.decision_recorded_at = None
+                record.decision_notes = None
+                record.status = PaymentStatus.AWAITING_GUARDIAN
+                record.tier = max(record.tier, policy_res.tier, 3)
+                record.guardian_deadline = now + timedelta(seconds=30)
+
+            record.version += 1
+            return self._build_full_view_from_record(record)
+
+    def verify_step_up(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+        request: PaymentStepUpRequest,
+    ) -> PaymentStepUpResponse:
+        """Complete step-up authentication challenge (WebAuthn stub / OTP step-up)."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can verify step-up challenge")
+            if record.status != PaymentStatus.AWAITING_STEP_UP:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Payment is in state {record.status.value}, not AWAITING_STEP_UP",
+                )
+            if not request.assertion_token.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Valid assertion token required")
+
+            now = datetime.now(timezone.utc)
+            record.step_up_verified_at = now.isoformat()
+            record.status = PaymentStatus.READY_TO_EXECUTE
+            record.version += 1
+            return PaymentStepUpResponse(
+                payment_id=record.id,
+                status=record.status.value,
+                step_up_verified=True,
+                verified_at=now,
+                is_mock_step_up=True,
+            )
+
+    def activate_backup_guardian(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> BackupGuardianActivateResponse:
+        """Re-route payment review to an active verified backup guardian when primary fails over."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can activate a backup guardian")
+            if record.status not in (PaymentStatus.AWAITING_GUARDIAN, PaymentStatus.AWAITING_FALLBACK_REVIEW):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Backup guardian failover unavailable in state {record.status.value}",
+                )
+
+            from app.services.guardian_service import get_guardian_service
+            backup_id = get_guardian_service().get_backup_guardian_for_payer(actor.user_id)
+            if backup_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="No active backup guardian enrolled for payer",
+                )
+            now = datetime.now(timezone.utc)
+            new_deadline = now + timedelta(seconds=30)
+            record.assigned_guardian_id = backup_id
+            record.status = PaymentStatus.AWAITING_GUARDIAN
+            record.guardian_deadline = new_deadline
+            record.version += 1
+            return BackupGuardianActivateResponse(
+                payment_id=record.id,
+                status=record.status.value,
+                assigned_guardian_id=backup_id,
+                guardian_deadline=new_deadline,
+            )
+
+    def create_appeal(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+        request: PaymentAppealCreateRequest,
+    ) -> PaymentAppealView:
+        """Allow owning payer to appeal a rejected, expired, failed, or fallback payment."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            if actor.user_id != record.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can appeal this payment")
+            if record.status not in (
+                PaymentStatus.REJECTED,
+                PaymentStatus.EXPIRED,
+                PaymentStatus.FAILED,
+                PaymentStatus.AWAITING_FALLBACK_REVIEW,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Cannot appeal payment in status {record.status.value}",
+                )
+            now = datetime.now(timezone.utc)
+            appeal_id = uuid4()
+            entry = {
+                "appeal_id": appeal_id,
+                "payment_id": payment_id,
+                "payer_id": actor.user_id,
+                "status": "OPEN",
+                "reason": request.reason.strip(),
+                "evidence_note": request.evidence_note.strip() if request.evidence_note else None,
+                "resolved_by_id": None,
+                "resolution_note": None,
+                "resolved_at": None,
+                "created_at": now,
+            }
+            self._appeals[appeal_id] = entry
+            return PaymentAppealView(**entry)
+
+    def list_appeals(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+    ) -> list[PaymentAppealView]:
+        """List appeals for a payment (owning payer, analyst, or admin)."""
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            is_privileged = UserRole.ANALYST in actor.roles or UserRole.ADMIN in actor.roles
+            if not is_privileged and record.payer_id != actor.user_id:
+                raise AuthorizationError("Forbidden: Not authorized to view appeals for this payment")
+            return [
+                PaymentAppealView(**a)
+                for a in self._appeals.values()
+                if a["payment_id"] == payment_id
+            ]
+
+    def resolve_appeal(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+        appeal_id: UUID,
+        request: PaymentAppealResolveRequest,
+    ) -> PaymentAppealView:
+        """Resolve an open appeal; strictly restricted to Analyst or Admin (no payer self-approval)."""
+        if UserRole.ANALYST not in actor.roles and UserRole.ADMIN not in actor.roles:
+            raise AuthorizationError("Forbidden: Only an independent analyst or admin can resolve appeals")
+        with self._lock:
+            record = self._payments.get(payment_id)
+            if record is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+            if record.payer_id == actor.user_id:
+                raise AuthorizationError("Forbidden: Self-approval of an appeal by the transaction payer is prohibited")
+            appeal = self._appeals.get(appeal_id)
+            if appeal is None or appeal["payment_id"] != payment_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Appeal not found")
+            if appeal["status"] != "OPEN":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Appeal is already resolved in status {appeal['status']}",
+                )
+            now = datetime.now(timezone.utc)
+            appeal["status"] = "APPROVED_RETRY_ELIGIBLE" if request.approved else "REJECTED"
+            appeal["resolved_by_id"] = actor.user_id
+            appeal["resolution_note"] = request.resolution_note.strip()
+            appeal["resolved_at"] = now
+            return PaymentAppealView(**appeal)
+
+    def retry_payment(
+        self,
+        actor: TrustedActorContext,
+        payment_id: str,
+        request: PaymentRetryRequest,
+        *,
+        advisory_signals: Any = None,
+    ) -> FullPaymentView:
+        """Create a safe child payment preserving parent fraud lineage after eligible failure/appeal."""
+        with self._lock:
+            parent = self._payments.get(payment_id)
+            if parent is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent payment not found")
+            if actor.user_id != parent.payer_id or UserRole.PAYER not in actor.roles:
+                raise AuthorizationError("Only the owning payer can retry this payment")
+
+            if parent.status == PaymentStatus.REJECTED:
+                has_approved_appeal = any(
+                    a["payment_id"] == payment_id and a["status"] == "APPROVED_RETRY_ELIGIBLE"
+                    for a in self._appeals.values()
+                )
+                if not has_approved_appeal:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Rejected payments cannot be retried without an analyst-approved appeal",
+                    )
+            elif parent.status not in (
+                PaymentStatus.FAILED,
+                PaymentStatus.EXPIRED,
+                PaymentStatus.CANCELLED,
+                PaymentStatus.AWAITING_FALLBACK_REVIEW,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Cannot retry payment in status {parent.status.value}",
+                )
+
+        child_req = PaymentCreateRequest(
+            beneficiary_id=parent.beneficiary_id,
+            amount_paise=parent.amount_paise,
+            purpose=request.purpose.strip() if request.purpose else parent.purpose,
+            idempotency_key=request.idempotency_key,
+        )
+        view = self.create_payment(actor, child_req, advisory_signals=advisory_signals)
+        with self._lock:
+            child = self._payments[view.id]
+            child.parent_payment_id = parent.id
+            child.reason_codes = list({*(parent.reason_codes or []), "RETRY_OF_PARENT"})
+            return self._build_full_view_from_record(child)
 
 
 

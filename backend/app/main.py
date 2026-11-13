@@ -4,8 +4,10 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 
 from app.api.account import router as account_router
+from app.api.bank import router as bank_router
 from app.api.guardian import router as guardian_router
 from app.api.health import router as health_router
+from app.api.notifications import router as notifications_router
 from app.api.payments import router as payments_router
 from app.api.policy_lab import router as policy_lab_router
 from app.api.razorpay import router as razorpay_router
@@ -17,6 +19,7 @@ from app.api.safety import (
     safe_lock_router,
     safety_router,
 )
+from app.api.v5_auth import auth_v5_router, identity_router
 from app.api.websocket import router as websocket_router
 from app.auth.router import router as auth_router
 from app.config import Settings, load_settings
@@ -49,9 +52,13 @@ def create_app(
     # Mount routers
     application.include_router(health_router, prefix="/api/v2")
     application.include_router(auth_router)
+    application.include_router(auth_v5_router)
+    application.include_router(identity_router)
     application.include_router(guardian_router)
+    application.include_router(notifications_router)
     application.include_router(payments_router)
     application.include_router(account_router)
+    application.include_router(bank_router)
     application.include_router(safe_lock_router)
     application.include_router(safety_router)
     application.include_router(audit_router)

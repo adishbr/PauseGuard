@@ -6,12 +6,15 @@ import { translator } from '../locales/messages.ts'
 import type { Locale } from '../locales/messages.ts'
 import { accountApi } from '../services/accountApi.ts'
 import { isReference, reviewKey, storageRead, storageWrite } from '../services/demoSession.ts'
+import { listNotificationOutbox } from '../services/paymentApi.ts'
+import type { NotificationOutboxItem } from '../services/paymentApi.ts'
 
 const guardianKey = 'pauseguard:demo:guardian-payment'
 
 export function Guardian({ locale, token, accountId }: { locale: Locale; token: string; accountId: string }) {
   const t = translator(locale)
   const [latest, setLatest] = useState('')
+  const [outboxItems, setOutboxItems] = useState<NotificationOutboxItem[]>([])
   const [inboxError, setInboxError] = useState(false)
   const [id, setId] = useState(() => {
     const previous = storageRead('sessionStorage', `${guardianKey}:${accountId}`)
@@ -31,9 +34,13 @@ export function Guardian({ locale, token, accountId }: { locale: Locale; token: 
       if (!active || reading) return
       reading = true
       try {
-        const result = await accountApi.review(token, storageRead('localStorage', reviewKey))
+        const [result, outbox] = await Promise.all([
+          accountApi.review(token, storageRead('localStorage', reviewKey)),
+          listNotificationOutbox(token, 8).catch(() => []),
+        ])
         if (active) {
           setLatest(result.id ?? '')
+          setOutboxItems(outbox)
           setInboxError(false)
         }
       } catch {
@@ -143,6 +150,33 @@ export function Guardian({ locale, token, accountId }: { locale: Locale; token: 
       <p id="reference-help" className={invalidReference ? 'field-error' : 'form-note'} role={invalidReference ? 'alert' : undefined}>
         {t(invalidReference ? 'invalidReference' : 'separateProfile')}
       </p>
+
+      {outboxItems.length > 0 && (
+        <div className="detail-panel" aria-label="Durable Notification Outbox">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>Notification Outbox ({outboxItems.length})</strong>
+            <span className="pill neutral">Redacted · Cross-Device</span>
+          </div>
+          <ul className="audit-list">
+            {outboxItems.slice(0, 5).map((item) => (
+              <li key={item.notification_id} className="audit-item">
+                <span>
+                  <code>{item.event_type}</code> · {item.channel} ({item.status})
+                </span>
+                {item.payment_id && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => openRequest(item.payment_id ?? '')}
+                  >
+                    Inspect {item.payment_id}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   )
 }

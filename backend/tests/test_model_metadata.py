@@ -12,17 +12,24 @@ from app.models.database import Base
 from app.models.metadata import (
     AuditEvent,
     GuardianDecision,
+    GuardianInvitation,
     IdempotencyRecord,
+    IdentityAssurance,
     LedgerEntry,
     MockAccount,
+    NotificationOutbox,
+    OtpChallenge,
     Payment,
+    PaymentAppeal,
     RazorpayOrder,
     RazorpayPayment,
     RazorpayWebhookEvent,
     RoleBinding,
     SafeLockState,
     SyntheticUser,
+    UserAccount,
     UserRole,
+    UserSession,
     metadata,
 )
 
@@ -32,6 +39,7 @@ ALL_TABLES = [
     "accounts",
     "safe_lock_states",
     "payments",
+    "payment_appeals",
     "guardian_decisions",
     "ledger_entries",
     "audit_events",
@@ -39,6 +47,12 @@ ALL_TABLES = [
     "razorpay_orders",
     "razorpay_payments",
     "razorpay_webhook_events",
+    "user_accounts",
+    "identity_assurances",
+    "otp_challenges",
+    "user_sessions",
+    "guardian_invitations",
+    "notification_outbox",
 ]
 
 ALL_MODELS = (
@@ -47,6 +61,7 @@ ALL_MODELS = (
     MockAccount,
     SafeLockState,
     Payment,
+    PaymentAppeal,
     GuardianDecision,
     LedgerEntry,
     AuditEvent,
@@ -54,6 +69,12 @@ ALL_MODELS = (
     RazorpayOrder,
     RazorpayPayment,
     RazorpayWebhookEvent,
+    UserAccount,
+    IdentityAssurance,
+    OtpChallenge,
+    UserSession,
+    GuardianInvitation,
+    NotificationOutbox,
 )
 
 
@@ -142,8 +163,24 @@ def test_timestamps_are_timezone_aware_and_required():
         for field in table.c:
             if isinstance(field.type, DateTime):
                 assert field.type.timezone is True
-                if field.name in ("guardian_deadline", "verified_at"):
-                    assert field.nullable is True
+                if field.name in (
+                    "guardian_deadline",
+                    "verified_at",
+                    "email_verified_at",
+                    "revoked_at",
+                    "consumed_at",
+                    "accepted_at",
+                    "step_up_verified_at",
+                    "resolved_at",
+                    "delivered_at",
+                ):
+                    if field.table.name == "identity_assurances" and field.name == "verified_at":
+                        assert field.nullable is False
+                        assert field.server_default is not None
+                    else:
+                        assert field.nullable is True
+                elif field.name == "expires_at":
+                    assert field.nullable is False
                 else:
                     assert field.nullable is False
                     assert field.server_default is not None

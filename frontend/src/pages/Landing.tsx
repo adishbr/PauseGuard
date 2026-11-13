@@ -66,6 +66,7 @@ export function Landing({ help }: { help: boolean }) {
           <a href="/#privacy">Privacy</a>
           <a href="/help">Help</a>
           <a href="/guardian/login">Guardian portal</a>
+          <a href="/admin/login">Admin & Razorpay sandbox</a>
         </nav>
       </footer>
     </div>

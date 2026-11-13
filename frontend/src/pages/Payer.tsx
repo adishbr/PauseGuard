@@ -308,6 +308,7 @@ export function Payer({ locale, reviewDuration, accountId, token }: {
       id={id}
       locale={locale}
       onClose={() => selectPayment('')}
+      onSelectPayment={selectPayment}
     />
   ) : (
     <PaymentForm

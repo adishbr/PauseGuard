@@ -2,8 +2,8 @@
 // These types are admin-UI-only and do not affect canonical V2 payment-domain contracts.
 import type { PayerPayment, Status } from './payment.ts'
 
-/** The two selectable testing modes in the Admin dashboard. */
-export type AdminTestMode = 'mock-upi' | 'razorpay'
+/** Selectable testing & intelligence modes in the Admin dashboard. */
+export type AdminTestMode = 'mock-upi' | 'razorpay' | 'policy-lab'
 
 /** Configuration for a single Mock UPI test run. */
 export interface MockUpiTestConfig {
