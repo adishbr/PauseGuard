@@ -1,7 +1,7 @@
 # PauseGuard V4.1 — Final Release & Demonstration Runbook
 
-**Release Candidate Branch:** `fix/hydrogen-final-v4-1-closure`  
-**Integration Worktree:** `D:\PauseGuard-Hydrogen-Integration`
+**Release Candidate Branch:** `feat/razorpay-test-mode-completion` (PR #27 targeting `main`)  
+**Integration Worktree:** `D:\PauseGuard-Hydrogen-Integration` (`D:\PauseGuard` untouched)
 
 ---
 

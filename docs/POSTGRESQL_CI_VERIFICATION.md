@@ -1,43 +1,39 @@
 # PostgreSQL Integration & CI Verification Report (V4.1)
 
-**Branch:** `fix/hydrogen-final-v4-1-closure` (from `release/pauseguard-v4-1-final`)  
-**Worktree:** `D:\PauseGuard-Hydrogen-Integration`
+**Branch:** `feat/razorpay-test-mode-completion` (PR #27 targeting `main`)  
+**Worktree:** `D:\PauseGuard-Hydrogen-Integration` (`D:\PauseGuard` untouched)
 
 ---
 
-## 1. Root Cause of Earlier PR #20 & Run #43471306451 Failures
+## 1. Root Cause of Concurrent Audit Hash-Chain Failure (`43479596624` / `43480031183`)
 
-Inspection of `origin/feature/member-4-postgres-ci` (`86c6c71` and its revert `dcfcdec`) and `backend/tests_integration/` identified three concrete issues that prevented clean PostgreSQL CI execution:
+GitHub Actions `postgres-integration` runs `43479596624` (`push`) and `43480031183` (`pull_request`) failed exclusively in `TestSecurityHardeningPersistence::test_concurrent_audit_writes_hash_chain_continuity_with_advisory_lock` (`70 passed, 1 failed`):
+- `AuditEvent.created_at` defaulted via PostgreSQL `func.now()`, which evaluates to `transaction_timestamp()` (fixed at **transaction BEGIN**, before acquiring `pg_advisory_xact_lock(74920491823)`), while `AuditEvent.id` was a random UUIDv4.
+- When Transaction T1 started earlier (`t1`) than Transaction T2 (`t2 > t1`) and T2 acquired `pg_advisory_xact_lock` first, T2 wrote the genesis row with timestamp `t2`, then T1 linked `prev_hash = T2.event_hash` with earlier timestamp `t1 < t2`.
+- Both `DurablePaymentEngine._append_audit_event` (`ORDER BY created_at DESC, id DESC`) and `verify_audit_chain` / integration assertions (`ORDER BY created_at ASC, id ASC`) ordered by `(created_at, id)`, causing subsequent writers to pick T2 again instead of T1 and genuinely **forking the hash chain** under concurrency.
 
-1. **Duplicate Unimported Test in `backend/tests_integration/test_integration.py`:**
-   - Lines 803–903 of `backend/tests_integration/test_integration.py` contained a duplicate copy of `test_concurrent_cancellation_and_confirmation_are_serialized` (whose authoritative copy with imports already lives in `backend/tests_integration/test_payment_ledger_integration.py`).
-   - `test_integration.py` did **not** import `_seed_test_payer`, `Payment`, `PaymentStatus`, `DurablePaymentEngine`, `PaymentConfirmRequest`, `ThreadPoolExecutor`, `HTTPException`, or `ledger_entries_for_payment`, causing an immediate `NameError` at runtime when the test ran.
-2. **Pre-PR #26 Guardian Deadline Rollback Bug:**
-   - When `86c6c71` was pushed (13:51 IST), PR #26 (`9ccc5c0`, 21:19 IST — `GuardianLateDecisionOutcome` + `JSONResponse(409)`) had not yet been implemented, so late guardian decisions raised `HTTPException(409)` inside `transaction_scope` and rolled back the `AWAITING_FALLBACK_REVIEW` transition.
-3. **Missing `0003_razorpay_merchant_sandbox.py` in `backend/tests_integration/migrations/versions/`:**
-   - `backend/migrations/versions/` included `0003_razorpay_merchant_sandbox.py` (revising `0002_durable_payment_ledger`), while `backend/tests_integration/migrations/versions/` stopped at `0002_durable_payment_ledger.py`.
+*(Prior PR #20 / `test_safe_lock_remains_enforced_after_timeout` fixes from `release/pauseguard-v4-1-final` remain intact: removal of duplicate unimported test in `test_integration.py`, sync of `0003_razorpay_merchant_sandbox.py`, and `TestGuardianDeadlineTransaction` repairs.)*
 
 ---
 
-## 2. Repairs Implemented on `release/pauseguard-v4-1-final`
+## 2. Authoritative `append_seq` Audit Ordering Repair (`ef70296` / `4b9f262`)
 
-1. **[backend/tests_integration/test_integration.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/test_integration.py):** Removed the duplicate unimported `test_concurrent_cancellation_and_confirmation_are_serialized` function at the end of `test_integration.py` (retaining the authoritative version in `test_payment_ledger_integration.py`).
-2. **[backend/tests_integration/migrations/versions/0003_razorpay_merchant_sandbox.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/migrations/versions/0003_razorpay_merchant_sandbox.py):** Synced revision `0003_razorpay_merchant_sandbox` into the integration test migration directory so `command.upgrade(config, "head")` and `command.downgrade(config, "base")` cover all three revisions (`0001` → `0002` → `0003`).
-3. **[backend/tests_integration/test_payment_ledger_integration.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/test_payment_ledger_integration.py):** Integrated PR #26's `TestGuardianDeadlineTransaction` suite, fixed `test_safe_lock_remains_enforced_after_timeout` (previously expecting `423` on an `AWAITING_FALLBACK_REVIEW` payment that `confirm_payment` rejects with `409` before the live Safe-Lock check) to test both the `AWAITING_FALLBACK_REVIEW` (`409`) guard and a `READY_TO_EXECUTE` + engaged Safe-Lock (`423`) guard with zero debits, and added `test_other_payer_cannot_probe_confirm_idempotency_key_in_postgresql` (16 tests total in `TestGuardianDeadlineTransaction`).
-4. **[.github/workflows/python-ci.yml](file:///D:/PauseGuard-Hydrogen-Integration/.github/workflows/python-ci.yml):** Restored the isolated `postgres-integration` job using `postgres:16` service container, healthcheck (`pg_isready`), disposable `pauseguard_test_ci` database (`127.0.0.1:5432`), and `python -m pytest -c backend/pytest_integration.ini backend/tests_integration -v`. Added `"integration/**"`, `"release/**"`, and `"fix/**"` to `on.push.branches`.
+1. **[backend/app/models/audit.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/app/models/audit.py):** Added `AUDIT_EVENTS_APPEND_SEQ = Sequence("audit_events_append_seq", start=1, increment=1, metadata=Base.metadata)`, `append_seq: Mapped[int]` (`BigInteger`, `nullable=False`), `CheckConstraint("append_seq > 0", name="ck_audit_events_positive_append_seq")`, and unique `Index("ix_audit_events_append_seq", "append_seq", unique=True)`.
+2. **[backend/app/services/durable_payment_engine.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/app/services/durable_payment_engine.py) & [foundation_queries.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/app/services/foundation_queries.py):**
+   - Acquired `pg_advisory_xact_lock(74920491823)` before allocating `nextval('audit_events_append_seq')` (with `last_seq + 1` fallback on non-PostgreSQL/mock sessions).
+   - Ordered tail lookup in `_append_audit_event`, chain reads in `get_payment_events` / `audit_events_for_payment`, and verification in `verify_audit_chain` strictly by `AuditEvent.append_seq` (tolerating positive monotonic gaps on rolled-back transactions while verifying genesis, links, and recomputed SHA-256 hashes).
+3. **[backend/migrations/versions/0004_audit_append_sequence.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/migrations/versions/0004_audit_append_sequence.py) & [backend/tests_integration/migrations/versions/0004_audit_append_sequence.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/migrations/versions/0004_audit_append_sequence.py):** Added nullable column, fail-closed cryptographic chain backfill validator (`reconstruct_verified_chain_order` rejecting forks/cycles/orphans/multiple geneses), check constraint, `NOT NULL`, unique index, and aligned `audit_events_append_seq` sequence via `setval`.
+4. **Regression Coverage (`test_migrations.py`, `test_phase4_durable_ledger.py`, `test_payment_ledger_integration.py`):** Added unit tests for `0004` chain reconstruction and fork/cycle/orphan rejection plus PostgreSQL tests for 8-thread concurrent hash chaining, 10x8 repeated rounds, inverted transaction-start timestamps, transaction rollbacks, fresh-session DB tamper detection, and concurrent mixed payment lifecycles.
 
 ---
 
-## 3. Verification Executed Locally vs. CI Gate
+## 3. Verified Execution Evidence
 
-- **Collection & Static Verification (Executed Locally):**
-  ```powershell
-  python -m pytest --collect-only -c backend/pytest_integration.ini backend/tests_integration -q
-  ```
-  - **Result:** **71 tests collected in 0.28s** (`42` in `test_integration.py` + `29` in `test_payment_ledger_integration.py`) with 0 import or syntax errors.
-- **Offline Migration & Regression Verification (Executed Locally):**
-  - `backend/tests/test_migrations.py` and `backend/tests/test_v41_closure_regressions.py` pass within the **1,031 passed** offline suite.
-- **Live PostgreSQL Execution Status:**
-  - **Local Host:** **BLOCKED** — Windows service `com.docker.service` is `Stopped` (`open //./pipe/docker_engine: The system cannot find the file specified`), and no local `postgres.exe` / `psql` binary is installed.
-  - **GitHub Actions Runner (`postgres-integration` job):** Configured and pushed on `fix/hydrogen-final-v4-1-closure` to trigger automatically on GitHub Actions. Because `adishbr/PauseGuard` is private and `gh` CLI is absent, verify the `postgres-integration` job status on the PR check tab before merging to `main`.
+- **GitHub Actions `postgres:16` Integration CI (Commit `4b9f262`, Both Triggers Green):**
+  - `pull_request` run `43483777510`: `Python tests` **success**; `PostgreSQL integration tests` **76 passed in 3.82s** (**success**).
+  - `push` run `43483764496`: `Python tests` **success**; `PostgreSQL integration tests` **76 passed in 4.96s** (**success**).
+- **Local Offline Collection & Migration Verification:**
+  - `pytest --collect-only -c backend/pytest_integration.ini backend/tests_integration -q`: **76 tests collected in 0.56s** (`40` in `test_integration.py` + `36` in `test_payment_ledger_integration.py`).
+  - `pytest tests backend/tests -q`: **1,035 passed, 1 warning, 52 subtests passed in 14.31s** (includes `test_migrations.py` & `test_v41_closure_regressions.py`).
+- **Local Host Docker Note:** Windows service `com.docker.service` is `Stopped` and no local `postgres` / `psql` binary is installed, so live PostgreSQL 16 verification was executed via the authoritative GitHub Actions `postgres:16` service container.
 
