@@ -502,10 +502,10 @@ class RazorpayMerchantService:
                 status="processed",
             )
             try:
-                self.session.add(webhook_entity)
-                self.session.flush()
+                with self.session.begin_nested():
+                    self.session.add(webhook_entity)
+                    self.session.flush()
             except IntegrityError:
-                self.session.rollback()
                 return RazorpayWebhookResponse(
                     status="duplicate",
                     event_id=event_id,

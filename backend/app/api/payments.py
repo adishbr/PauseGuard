@@ -11,8 +11,9 @@ Endpoints:
 """
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any, Union
+from typing import TYPE_CHECKING, Annotated, Any, Optional, Union
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -37,11 +38,66 @@ from app.models.roles import UserRole
 from app.services.events import broadcast_event_sync
 from app.services.payment_guards import TrustedActorContext
 from app.services.payment_service import PaymentService, get_payment_service
+from intelligence.advisory.adapter import DIAGNOSTIC_TIMEOUT, DIAGNOSTIC_UNHANDLED_EXCEPTION, evaluate_advisory
+from intelligence.advisory.types import AdvisoryRequest, get_default_scoring_config
+from intelligence.schemas.risk_signals import RiskSignals, make_degraded_advisory
 
 if TYPE_CHECKING:
     from app.services.durable_payment_engine import DurablePaymentEngine
 
 router = APIRouter(prefix="/api/v2/payments", tags=["payments"])
+
+_ADVISORY_TIMEOUT_SECONDS = 0.5
+_ADVISORY_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pauseguard-advisory")
+
+
+def _schedule_post_commit_broadcast(http_request: Optional[Request], **event_kwargs: Any) -> None:
+    """Queue WebSocket notification for post-commit dispatch when inside get_payment_engine."""
+    pending = getattr(getattr(http_request, "state", None), "_post_commit_events", None)
+    if isinstance(pending, list):
+        pending.append(event_kwargs)
+    else:
+        broadcast_event_sync(**event_kwargs)
+
+
+def _evaluate_payment_advisory_bounded(
+    actor: TrustedActorContext,
+    request: PaymentCreateRequest,
+) -> RiskSignals:
+    """Evaluate AI risk advisory signals outside DB locks with fail-closed timeout handling."""
+    preview_id = f"pre_{request.idempotency_key[:32]}"
+    adv_req = AdvisoryRequest(
+        payment_id=preview_id,
+        payer_id=str(actor.user_id),
+        beneficiary_id=request.beneficiary_id,
+        amount_paise=request.amount_paise,
+        transcript_text=None,
+        transcript_consented=False,
+        scoring_config=get_default_scoring_config(),
+    )
+    future = _ADVISORY_EXECUTOR.submit(evaluate_advisory, adv_req)
+    try:
+        adv_res = future.result(timeout=_ADVISORY_TIMEOUT_SECONDS)
+        return adv_res.risk_signals
+    except FuturesTimeoutError:
+        future.cancel()
+        return make_degraded_advisory(
+            payment_id=preview_id,
+            payer_id=str(actor.user_id),
+            beneficiary_id=request.beneficiary_id,
+            amount_paise=request.amount_paise,
+            degraded_reasons=(DIAGNOSTIC_TIMEOUT,),
+            reason_codes=("RC_ADVISORY_SCORE_UNAVAILABLE", "RC_ADVISORY_EVALUATION_TIMEOUT"),
+        )
+    except Exception:
+        return make_degraded_advisory(
+            payment_id=preview_id,
+            payer_id=str(actor.user_id),
+            beneficiary_id=request.beneficiary_id,
+            amount_paise=request.amount_paise,
+            degraded_reasons=(DIAGNOSTIC_UNHANDLED_EXCEPTION,),
+            reason_codes=("RC_ADVISORY_SCORE_UNAVAILABLE", "RC_ADVISORY_EVALUATION_ERROR"),
+        )
 
 
 def get_payment_engine(
@@ -50,12 +106,16 @@ def get_payment_engine(
     """Resolve authoritative database-backed engine or explicitly configured mock service.
 
     Production-intended execution must not silently fall back to in-memory payment state.
-    If session_factory is present on application.state, binds a transactional session to DurablePaymentEngine.
-    If session_factory is absent and mode is mock, uses PaymentService.
+    If session_factory is present on application.state, binds a transactional session to DurablePaymentEngine
+    and dispatches queued WebSocket notifications strictly AFTER session.commit() succeeds.
+    If session_factory is absent and mode is mock, uses PaymentService and emits queued events after route return.
     If session_factory is absent and mode is not mock, raises 503 Service Unavailable.
     """
     session_factory = getattr(request.app.state, "session_factory", None)
     settings = getattr(request.app.state, "settings", None) or load_settings()
+    pending_events: list[dict[str, Any]] = []
+    if hasattr(request, "state"):
+        request.state._post_commit_events = pending_events
 
     if session_factory is not None:
         from app.services.durable_payment_engine import DurablePaymentEngine
@@ -65,8 +125,12 @@ def get_payment_engine(
             yield DurablePaymentEngine(session)
             session.commit()
         except BaseException:
+            pending_events.clear()
             session.rollback()
             raise
+        else:
+            for ev in pending_events:
+                broadcast_event_sync(**ev)
         finally:
             session.close()
     else:
@@ -79,7 +143,14 @@ def get_payment_engine(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Durable persistence is required but database session factory is not configured.",
             )
-        yield get_payment_service()
+        try:
+            yield get_payment_service()
+        except BaseException:
+            pending_events.clear()
+            raise
+        else:
+            for ev in pending_events:
+                broadcast_event_sync(**ev)
 
 
 @router.get("", response_model=list[Union[FullPaymentView, RedactedPaymentView]])
@@ -95,6 +166,7 @@ def list_payments(
 
 @router.post("", response_model=FullPaymentView, status_code=status.HTTP_201_CREATED)
 def create_payment(
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     request: PaymentCreateRequest,
     engine: Annotated[Any, Depends(get_payment_engine)],
@@ -104,14 +176,16 @@ def create_payment(
     If high risk / tier 3, requires an authoritative enrolled guardian and
     initiates the 30-second review countdown.
     """
-    res = engine.create_payment(actor, request)
+    advisory_signals = _evaluate_payment_advisory_bounded(actor, request)
+    res = engine.create_payment(actor, request, advisory_signals=advisory_signals)
     gid = None
     if getattr(res, "assigned_guardian_id", None):
         try:
             gid = UUID(res.assigned_guardian_id)
         except (ValueError, TypeError):
             pass
-    broadcast_event_sync(
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.id,
         event_type="PAYMENT_CREATED",
         status=res.status,
@@ -231,6 +305,7 @@ def get_payment_evidence(
 @router.post("/{payment_id}/warning/acknowledge", response_model=PaymentWarningAckResponse)
 def acknowledge_warning(
     payment_id: str,
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     engine: Annotated[Any, Depends(get_payment_engine)],
 ) -> PaymentWarningAckResponse:
@@ -239,7 +314,8 @@ def acknowledge_warning(
     Only callable by the owning payer. Invariant: Acknowledgment does NOT execute the payment.
     """
     res = engine.acknowledge_warning(actor, payment_id)
-    broadcast_event_sync(
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.payment_id,
         event_type="PAYMENT_WARNING_ACKNOWLEDGED",
         status=res.status,
@@ -251,6 +327,7 @@ def acknowledge_warning(
 @router.post("/{payment_id}/guardian/decision", response_model=PaymentDecisionResponse)
 def submit_guardian_decision(
     payment_id: str,
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     request: GuardianDecisionRequest,
     engine: Annotated[Any, Depends(get_payment_engine)],
@@ -279,11 +356,17 @@ def submit_guardian_decision(
                 "status": res.status,
             },
         )
-    broadcast_event_sync(
+    payer_id = (
+        engine.get_payment_payer_id(payment_id)
+        if hasattr(engine, "get_payment_payer_id")
+        else getattr(res, "payer_id", None)
+    ) or actor.user_id
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.payment_id,
         event_type="GUARDIAN_DECISION",
         status=res.status,
-        payer_id=getattr(res, "payer_id", actor.user_id),
+        payer_id=payer_id,
         assigned_guardian_id=actor.user_id,
     )
     return res
@@ -292,6 +375,7 @@ def submit_guardian_decision(
 @router.post("/{payment_id}/fallback/activate", response_model=PaymentFallbackResponse)
 def activate_fallback(
     payment_id: str,
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     engine: Annotated[Any, Depends(get_payment_engine)],
 ) -> PaymentFallbackResponse:
@@ -301,7 +385,8 @@ def activate_fallback(
     Invariant: Fallback transition cannot authorize payment execution.
     """
     res = engine.activate_fallback(actor, payment_id)
-    broadcast_event_sync(
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.payment_id,
         event_type="FALLBACK_ACTIVATED",
         status=res.status,
@@ -313,6 +398,7 @@ def activate_fallback(
 @router.post("/{payment_id}/cancel", response_model=PaymentConfirmResponse)
 def cancel_payment(
     payment_id: str,
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     engine: Annotated[Any, Depends(get_payment_engine)],
 ) -> PaymentConfirmResponse:
@@ -322,7 +408,8 @@ def cancel_payment(
     Non-owning payers and non-payers are rejected with 403 Forbidden.
     """
     res = engine.cancel_payment(actor, payment_id)
-    broadcast_event_sync(
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.payment_id,
         event_type="PAYMENT_CANCELLED",
         status=res.status,
@@ -335,6 +422,7 @@ def cancel_payment(
 @router.post("/{payment_id}/confirm", response_model=PaymentConfirmResponse)
 def confirm_payment(
     payment_id: str,
+    http_request: Request,
     actor: Annotated[TrustedActorContext, Depends(get_current_actor)],
     request: PaymentConfirmRequest,
     engine: Annotated[Any, Depends(get_payment_engine)],
@@ -345,7 +433,8 @@ def confirm_payment(
     and hard policy before execution.
     """
     res = engine.confirm_payment(actor, payment_id, request)
-    broadcast_event_sync(
+    _schedule_post_commit_broadcast(
+        http_request,
         payment_id=res.payment_id,
         event_type="PAYMENT_EXECUTED",
         status=res.status,

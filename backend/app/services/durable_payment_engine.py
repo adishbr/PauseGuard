@@ -10,6 +10,7 @@ Enforces:
 7. Strict role boundaries: Guardians cannot execute payments.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -92,6 +93,14 @@ class GuardianLateDecisionOutcome:
 def _compute_hash(prev_hash: str, event_type: str, payment_id: Optional[str], actor_id: UUID, payload: dict) -> str:
     content = f"{prev_hash}|{event_type}|{payment_id or ''}|{actor_id}|{json.dumps(payload, sort_keys=True)}"
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _savepoint_scope(session: Session):
+    """Enter a SQL savepoint when supported by session; fall back for bare Mock sessions."""
+    sp = session.begin_nested()
+    if callable(getattr(sp, "__enter__", None)) and callable(getattr(sp, "__exit__", None)):
+        return sp
+    return nullcontext()
 
 
 class DurablePaymentEngine:
@@ -251,38 +260,39 @@ class DurablePaymentEngine:
         )
 
         try:
-            self.session.add(payment)
-            self.session.flush()
+            with _savepoint_scope(self.session):
+                self.session.add(payment)
+                self.session.flush()
 
-            # Build view
-            view = self._build_full_view(payment)
+                # Build view
+                view = self._build_full_view(payment)
 
-            # Record idempotency record
-            idem_record = IdempotencyRecord(
-                key=request.idempotency_key,
-                caller_id=actor.user_id,
-                endpoint=endpoint,
-                request_hash=request_hash,
-                response_status=201,
-                response_body=view.model_dump(),
-            )
-            self.session.add(idem_record)
+                # Record idempotency record
+                idem_record = IdempotencyRecord(
+                    key=request.idempotency_key,
+                    caller_id=actor.user_id,
+                    endpoint=endpoint,
+                    request_hash=request_hash,
+                    response_status=201,
+                    response_body=view.model_dump(),
+                )
+                self.session.add(idem_record)
 
-            # Audit event
-            self._append_audit_event(
-                event_type="PAYMENT_CREATED",
-                actor=actor,
-                payment_id=payment_id,
-                payload={
-                    "amount_paise": request.amount_paise,
-                    "tier": tier,
-                    "status": initial_status,
-                },
-            )
-            self.session.flush()
+                # Audit event
+                self._append_audit_event(
+                    event_type="PAYMENT_CREATED",
+                    actor=actor,
+                    payment_id=payment_id,
+                    payload={
+                        "amount_paise": request.amount_paise,
+                        "tier": tier,
+                        "status": initial_status,
+                    },
+                )
+                self.session.flush()
             return view
         except IntegrityError:
-            self.session.rollback()
+            # Savepoint rolled back automatically without disturbing outer transaction_scope
             existing_idem = self.session.scalars(idempotency_record_for_update(request.idempotency_key)).one_or_none()
             if existing_idem:
                 if existing_idem.caller_id != actor.user_id or existing_idem.endpoint != endpoint:
@@ -508,6 +518,20 @@ class DurablePaymentEngine:
         endpoint = f"/api/v2/payments/{payment_id}/confirm"
         request_hash = hashlib.sha256(f"{actor.user_id}:{payment_id}:{request.idempotency_key}".encode()).hexdigest()
 
+        # Authorize owning payer before idempotency replay so non-payers receive 403/404 instead of probing keys
+        payment = self.session.scalars(payment_for_update(payment_id)).one_or_none()
+        if not payment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Payment {payment_id} not found",
+            )
+
+        if payment.payer_id != actor.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the owning payer can confirm and execute a payment",
+            )
+
         # Idempotency check
         existing_idem = self.session.scalars(idempotency_record_for_update(request.idempotency_key)).one_or_none()
         if existing_idem:
@@ -522,20 +546,6 @@ class DurablePaymentEngine:
                     detail="Idempotency key reused with mismatched confirmation parameters",
                 )
             return PaymentConfirmResponse.model_validate(existing_idem.response_body)
-
-        # Lock payment row
-        payment = self.session.scalars(payment_for_update(payment_id)).one_or_none()
-        if not payment:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Payment {payment_id} not found",
-            )
-
-        if payment.payer_id != actor.user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only the owning payer can confirm and execute a payment",
-            )
 
         if payment.status == PaymentStatus.EXECUTED.value:
             raise HTTPException(
@@ -577,79 +587,80 @@ class DurablePaymentEngine:
             )
 
         try:
-            # Atomic balance debit
-            account.balance_paise -= payment.amount_paise
-            account.version += 1
+            with _savepoint_scope(self.session):
+                # Atomic balance debit
+                account.balance_paise -= payment.amount_paise
+                account.version += 1
 
-            # Record immutable ledger entry
-            debit_idempotency_key = f"debit_{payment.id}_{request.idempotency_key}"
-            ledger_entry = LedgerEntry(
-                payment_id=payment.id,
-                account_id=account.id,
-                amount_paise=payment.amount_paise,
-                entry_type="DEBIT",
-                idempotency_key=debit_idempotency_key,
-            )
-            self.session.add(ledger_entry)
+                # Record immutable ledger entry
+                debit_idempotency_key = f"debit_{payment.id}_{request.idempotency_key}"
+                ledger_entry = LedgerEntry(
+                    payment_id=payment.id,
+                    account_id=account.id,
+                    amount_paise=payment.amount_paise,
+                    entry_type="DEBIT",
+                    idempotency_key=debit_idempotency_key,
+                )
+                self.session.add(ledger_entry)
 
-            # In double-entry P2P flows: if beneficiary is a registered user with an account, credit them
-            beneficiary_uuid = None
-            try:
-                beneficiary_uuid = UUID(payment.beneficiary_id)
-            except (ValueError, TypeError, AttributeError):
-                pass
+                # In double-entry P2P flows: if beneficiary is a registered user with an account, credit them
+                beneficiary_uuid = None
+                try:
+                    beneficiary_uuid = UUID(payment.beneficiary_id)
+                except (ValueError, TypeError, AttributeError):
+                    pass
 
-            if beneficiary_uuid is not None:
-                beneficiary_account = self.session.scalars(payer_account_for_update(beneficiary_uuid)).one_or_none()
-                if beneficiary_account:
-                    beneficiary_account.balance_paise += payment.amount_paise
-                    beneficiary_account.version += 1
-                    credit_idempotency_key = f"credit_{payment.id}_{request.idempotency_key}"
-                    credit_entry = LedgerEntry(
-                        payment_id=payment.id,
-                        account_id=beneficiary_account.id,
-                        amount_paise=payment.amount_paise,
-                        entry_type="CREDIT",
-                        idempotency_key=credit_idempotency_key,
-                    )
-                    self.session.add(credit_entry)
+                if beneficiary_uuid is not None:
+                    beneficiary_account = self.session.scalars(payer_account_for_update(beneficiary_uuid)).one_or_none()
+                    if beneficiary_account:
+                        beneficiary_account.balance_paise += payment.amount_paise
+                        beneficiary_account.version += 1
+                        credit_idempotency_key = f"credit_{payment.id}_{request.idempotency_key}"
+                        credit_entry = LedgerEntry(
+                            payment_id=payment.id,
+                            account_id=beneficiary_account.id,
+                            amount_paise=payment.amount_paise,
+                            entry_type="CREDIT",
+                            idempotency_key=credit_idempotency_key,
+                        )
+                        self.session.add(credit_entry)
 
-            now = datetime.now(timezone.utc)
-            payment.status = PaymentStatus.EXECUTED.value
-            payment.version += 1
+                now = datetime.now(timezone.utc)
+                payment.status = PaymentStatus.EXECUTED.value
+                payment.version += 1
 
-            response = PaymentConfirmResponse(
-                payment_id=payment.id,
-                status=payment.status,
-                amount_paise=payment.amount_paise,
-                confirmed_at=now.isoformat(),
-            )
+                response = PaymentConfirmResponse(
+                    payment_id=payment.id,
+                    status=payment.status,
+                    amount_paise=payment.amount_paise,
+                    confirmed_at=now.isoformat(),
+                )
 
-            # Save idempotency record
-            idem_record = IdempotencyRecord(
-                key=request.idempotency_key,
-                caller_id=actor.user_id,
-                endpoint=endpoint,
-                request_hash=request_hash,
-                response_status=200,
-                response_body=response.model_dump(),
-            )
-            self.session.add(idem_record)
+                # Save idempotency record
+                idem_record = IdempotencyRecord(
+                    key=request.idempotency_key,
+                    caller_id=actor.user_id,
+                    endpoint=endpoint,
+                    request_hash=request_hash,
+                    response_status=200,
+                    response_body=response.model_dump(),
+                )
+                self.session.add(idem_record)
 
-            self._append_audit_event(
-                event_type="PAYMENT_EXECUTED",
-                actor=actor,
-                payment_id=payment.id,
-                payload={
-                    "amount_paise": payment.amount_paise,
-                    "account_id": str(account.id),
-                    "new_balance_paise": account.balance_paise,
-                },
-            )
-            self.session.flush()
+                self._append_audit_event(
+                    event_type="PAYMENT_EXECUTED",
+                    actor=actor,
+                    payment_id=payment.id,
+                    payload={
+                        "amount_paise": payment.amount_paise,
+                        "account_id": str(account.id),
+                        "new_balance_paise": account.balance_paise,
+                    },
+                )
+                self.session.flush()
             return response
         except IntegrityError:
-            self.session.rollback()
+            # Savepoint rolled back automatically without disturbing outer transaction_scope
             existing_idem = self.session.scalars(idempotency_record_for_update(request.idempotency_key)).one_or_none()
             if existing_idem:
                 if existing_idem.caller_id != actor.user_id or existing_idem.endpoint != endpoint:
@@ -760,6 +771,11 @@ class DurablePaymentEngine:
     get_payment_view = get_payment
     submit_guardian_decision = record_guardian_decision
     activate_fallback = activate_fallback_review
+
+    def get_payment_payer_id(self, payment_id: str) -> Optional[UUID]:
+        """Resolve owning payer UUID for post-commit WebSocket notification routing."""
+        payment = self.session.query(Payment).filter(Payment.id == payment_id).one_or_none()
+        return payment.payer_id if payment is not None else None
 
     def _build_full_view(self, payment: Payment) -> FullPaymentView:
         return FullPaymentView(

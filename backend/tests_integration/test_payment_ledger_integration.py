@@ -1265,7 +1265,7 @@ class TestGuardianDeadlineTransaction:
     # ------------------------------------------------------------------
 
     def test_safe_lock_remains_enforced_after_timeout(self, pg_session: Session) -> None:
-        """Safe-Lock fail-closed still applies after deadline expiry."""
+        """Both fallback state lock and live Safe-Lock block confirmation without debit."""
         payer_id = uuid4()
         guardian_id = uuid4()
         payment_id = self._create_awaiting_guardian_payment(
@@ -1273,6 +1273,7 @@ class TestGuardianDeadlineTransaction:
             datetime.now(timezone.utc) - timedelta(seconds=5),
         )
 
+        from app.models.ledger import LedgerEntry
         from app.models.safe_lock import SafeLockState
         safe_lock = pg_session.query(SafeLockState).filter(
             SafeLockState.payer_id == payer_id
@@ -1292,19 +1293,55 @@ class TestGuardianDeadlineTransaction:
 
         from app.services.durable_payment_engine import GuardianLateDecisionOutcome
         assert isinstance(result, GuardianLateDecisionOutcome)
+        assert result.status == PaymentStatus.AWAITING_FALLBACK_REVIEW.value
 
         payer_actor = TrustedActorContext(
             user_id=payer_id,
             roles=frozenset({UserRole.PAYER}),
         )
+        # 1. Expired payment in AWAITING_FALLBACK_REVIEW cannot confirm (HTTP 409)
         with pytest.raises(HTTPException) as exc_info:
             with transaction_scope(pg_session):
                 engine.confirm_payment(
                     payer_actor, payment_id,
+                    PaymentConfirmRequest(idempotency_key=f"confirm_fallback_{uuid4().hex[:8]}"),
+                )
+        assert exc_info.value.status_code == 409
+        assert PaymentStatus.AWAITING_FALLBACK_REVIEW.value in exc_info.value.detail
+
+        # 2. A READY_TO_EXECUTE payment still fails closed with HTTP 423 when Safe-Lock is engaged
+        ready_payment_id = f"pg_{uuid4().hex[:16]}"
+        ready_payment = Payment(
+            id=ready_payment_id,
+            payer_id=payer_id,
+            beneficiary_id="vendor_locked_test",
+            amount_paise=250_000,
+            purpose="approved but safe-locked",
+            status=PaymentStatus.READY_TO_EXECUTE.value,
+            tier=0,
+            risk_score=10,
+            idempotency_key=f"idem_ready_{uuid4().hex[:8]}",
+            version=1,
+        )
+        pg_session.add(ready_payment)
+        pg_session.commit()
+
+        with pytest.raises(HTTPException) as exc_locked:
+            with transaction_scope(pg_session):
+                engine.confirm_payment(
+                    payer_actor, ready_payment_id,
                     PaymentConfirmRequest(idempotency_key=f"confirm_locked_{uuid4().hex[:8]}"),
                 )
-        assert exc_info.value.status_code == 423
-        assert "Safe-Lock" in exc_info.value.detail
+        assert exc_locked.value.status_code == 423
+        assert "Safe-Lock" in exc_locked.value.detail
+
+        # Verify zero ledger debits and unchanged payer balance across both attempts
+        entries_count = pg_session.query(LedgerEntry).filter(
+            LedgerEntry.payment_id.in_([payment_id, ready_payment_id])
+        ).count()
+        assert entries_count == 0
+        account = pg_session.query(MockAccount).filter(MockAccount.owner_id == payer_id).one()
+        assert account.balance_paise == 100_000_000
 
     def test_no_balance_changes_after_timeout(self, pg_session: Session) -> None:
         """No ledger entries created after deadline expiry."""
@@ -1448,5 +1485,49 @@ class TestGuardianDeadlineTransaction:
             with transaction_scope(pg_session):
                 engine.confirm_payment(
                     guardian_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
+                )
+        assert exc_info.value.status_code == 403
+
+    def test_other_payer_cannot_probe_confirm_idempotency_key_in_postgresql(
+        self, pg_session: Session
+    ) -> None:
+        """Non-owning payer guessing confirm idempotency_key receives 403 Forbidden, not 409."""
+        owner_id = uuid4()
+        other_payer_id = uuid4()
+        _seed_test_payer(pg_session, owner_id, initial_balance=50_000_000)
+        _seed_test_payer(pg_session, other_payer_id, initial_balance=50_000_000)
+
+        payment_id = f"pg_{uuid4().hex[:16]}"
+        pg_session.add(
+            Payment(
+                id=payment_id,
+                payer_id=owner_id,
+                beneficiary_id="vendor_probe_pg",
+                amount_paise=500_000,
+                purpose="authz probe test",
+                status=PaymentStatus.READY_TO_EXECUTE.value,
+                tier=0,
+                risk_score=10,
+                idempotency_key=f"idem_create_probe_{uuid4().hex[:8]}",
+                version=1,
+            )
+        )
+        pg_session.commit()
+
+        owner_actor = TrustedActorContext(user_id=owner_id, roles=frozenset({UserRole.PAYER}))
+        other_actor = TrustedActorContext(user_id=other_payer_id, roles=frozenset({UserRole.PAYER}))
+        confirm_key = f"confirm_probe_{uuid4().hex[:8]}"
+        engine = DurablePaymentEngine(pg_session)
+
+        with transaction_scope(pg_session):
+            resp = engine.confirm_payment(
+                owner_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
+            )
+        assert resp.status == PaymentStatus.EXECUTED.value
+
+        with pytest.raises(HTTPException) as exc_info:
+            with transaction_scope(pg_session):
+                engine.confirm_payment(
+                    other_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
                 )
         assert exc_info.value.status_code == 403
