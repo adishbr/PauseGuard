@@ -35,7 +35,7 @@ from app.models.roles import UserRole
 from app.services.identity_assurance_service import IdentityAssuranceService
 from app.services.otp_service import OtpService
 from app.services.payment_guards import TrustedActorContext
-from app.services.v5_store import MockGuardianInvitationRecord, V5MockIdentityStore
+from app.services.v5_store import MockGuardianInvitationRecord, V5MockIdentityStore, as_utc
 
 _INVITE_TTL_HOURS = 48
 _INVITE_TERMINAL_STATES = frozenset({"DECLINED", "REVOKED", "EXPIRED"})
@@ -349,7 +349,7 @@ class GuardianInvitationService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Guardian invitation is in terminal state {row.status}.",
             )
-        if row.expires_at <= current_time:
+        if as_utc(row.expires_at) <= current_time:
             row.status = "EXPIRED"
             row.updated_at = current_time
             persist_fn()

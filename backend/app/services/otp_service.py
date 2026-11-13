@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, load_settings
-from app.services.v5_store import MockOtpChallengeRecord, V5MockIdentityStore
+from app.services.v5_store import MockOtpChallengeRecord, V5MockIdentityStore, as_utc
 
 _OTP_HMAC_PEPPER = b"pauseguard-v5-otp-hmac-pepper-local"
 OTP_TTL_SECONDS = 300
@@ -188,7 +188,7 @@ class OtpService:
         if not bypass_cooldown and self._cooldown_seconds > 0:
             recent = self._get_latest_challenge(contact=normalized, purpose=purpose)
             if recent is not None and recent.status == "PENDING":
-                elapsed = (current_time - recent.created_at).total_seconds()
+                elapsed = (current_time - as_utc(recent.created_at)).total_seconds()
                 if elapsed < self._cooldown_seconds:
                     remaining = max(1, int(self._cooldown_seconds - elapsed))
                     raise HTTPException(
@@ -342,7 +342,7 @@ class OtpService:
         if record.status == "LOCKED":
             raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="OTP challenge locked after too many invalid attempts.")
 
-        if record.status == "EXPIRED" or record.expires_at <= current_time:
+        if record.status == "EXPIRED" or as_utc(record.expires_at) <= current_time:
             record.status = "EXPIRED"
             persist_fn()
             raise HTTPException(status_code=status.HTTP_410_GONE, detail="OTP challenge has expired.")
