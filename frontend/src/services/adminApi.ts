@@ -318,3 +318,50 @@ export const razorpayApi = {
     )
   },
 }
+
+export interface PolicyLabSimulationResult {
+  seed: number
+  dataset_split: string
+  total_scenarios_evaluated: number
+  evaluation_latency_ms: number
+  is_synthetic: boolean
+  declaration: string
+  calibration?: {
+    baseline_a_threshold_paise: number
+    personal_deviation_threshold: number
+    business_deviation_threshold: number
+  }
+  policy_metrics: Record<string, {
+    policy_name: string
+    total_scenarios: number
+    friction_cost_score?: number
+    precision: { rate: number | null; numerator: number; denominator: number }
+    recall: { rate: number | null; numerator: number; denominator: number }
+    false_positive_rate: { rate: number | null; numerator: number; denominator: number }
+    business_disruption_rate: { rate: number | null; numerator: number; denominator: number }
+  }>
+  scam_category_breakdown?: Record<string, {
+    total: number
+    policies: Record<string, { flagged_count: number; flag_rate: number | null }>
+  }>
+}
+
+export const policyLabApi = {
+  simulate: async (
+    token: string,
+    payload: {
+      sample_size: number
+      seed: number
+      baseline_a_threshold_paise: number
+      personal_deviation_threshold?: number
+      business_deviation_threshold?: number
+    },
+    baseUrl = '',
+  ): Promise<PolicyLabSimulationResult> => {
+    return adminRequest<PolicyLabSimulationResult>(
+      `${baseUrl}/api/v2/policy-lab/simulate`,
+      token,
+      payload,
+    )
+  },
+}

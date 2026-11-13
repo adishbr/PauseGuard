@@ -196,3 +196,44 @@ export const guardianDecision = (token: string, id: string, decision: 'approve' 
     id,
     body: isRealBackendMode() ? { approved: decision === 'approve' } : { decision },
   })
+
+export interface WsTicketResponse {
+  ticket: string
+  expires_in_seconds: number
+  expires_at: string
+  single_use: boolean
+}
+
+export async function issueWsTicket(token: string): Promise<WsTicketResponse> {
+  const response = await fetch('/api/v2/ws/ticket', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) throw httpError(response.status)
+  return (await response.json()) as WsTicketResponse
+}
+
+export interface NotificationOutboxItem {
+  notification_id: string
+  payment_id: string | null
+  recipient_user_id: string
+  recipient_role: string
+  channel: string
+  event_type: string
+  payload: Record<string, unknown>
+  status: string
+  delivery_provider: string
+  attempts: number
+  created_at: string
+  delivered_at: string | null
+}
+
+export async function listNotificationOutbox(token: string, limit = 20): Promise<NotificationOutboxItem[]> {
+  if (!isRealBackendMode()) return []
+  const response = await fetch(`/api/v2/notifications/outbox?limit=${encodeURIComponent(String(limit))}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) throw httpError(response.status)
+  const data = (await response.json()) as { items?: NotificationOutboxItem[] }
+  return data.items ?? []
+}
