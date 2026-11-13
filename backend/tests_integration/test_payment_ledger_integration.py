@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
@@ -39,7 +39,11 @@ from app.models.payment import (
 )
 from app.models.safe_lock import SafeLockState
 from app.models.user import RoleBinding, SyntheticUser, UserRole
-from app.services.durable_payment_engine import DurablePaymentEngine
+from app.services.durable_payment_engine import (
+    GENESIS_HASH,
+    DurablePaymentEngine,
+    _compute_hash,
+)
 from app.services.foundation_queries import (
     ledger_entries_for_payment,
     payer_account_for_update,
@@ -586,6 +590,52 @@ class TestWarningAcknowledgmentPersistence:
         assert persisted.version == 2
 
 
+def _assert_unbroken_audit_chain(session: Session, expected_min_events: int) -> list[AuditEvent]:
+    """Assert authoritative append_seq ordering, unique genesis, zero forks, and SHA-256 validity."""
+    events = (
+        session.query(AuditEvent)
+        .order_by(AuditEvent.append_seq.asc())
+        .all()
+    )
+    assert len(events) >= expected_min_events
+
+    genesis_events = [e for e in events if e.prev_hash == GENESIS_HASH]
+    assert len(genesis_events) == 1, f"Expected exactly 1 genesis event, found {len(genesis_events)}"
+    assert events[0].prev_hash == GENESIS_HASH
+
+    seen_prev_hashes: set[str] = set()
+    prev_hash = GENESIS_HASH
+    for i, ev in enumerate(events):
+        assert isinstance(ev.append_seq, int) and ev.append_seq > 0
+        if i > 0:
+            assert ev.append_seq > events[i - 1].append_seq, (
+                f"Non-monotonic append_seq at index {i}: {events[i - 1].append_seq} -> {ev.append_seq}"
+            )
+        assert ev.prev_hash not in seen_prev_hashes, (
+            f"Chain fork detected: duplicate successor pointing to prev_hash {ev.prev_hash}"
+        )
+        seen_prev_hashes.add(ev.prev_hash)
+        assert ev.prev_hash == prev_hash, (
+            f"Hash chain broken at event {i} (append_seq={ev.append_seq}): "
+            f"prev_hash {ev.prev_hash} != {prev_hash}"
+        )
+        expected_hash = _compute_hash(
+            prev_hash,
+            ev.event_type,
+            ev.payment_id,
+            ev.actor_id,
+            ev.payload_json if ev.payload_json is not None else {},
+        )
+        assert ev.event_hash == expected_hash, f"Recomputed hash mismatch at append_seq={ev.append_seq}"
+        prev_hash = ev.event_hash
+
+    valid, total, head_hash = DurablePaymentEngine(session).verify_audit_chain()
+    assert valid is True
+    assert total == len(events)
+    assert head_hash == events[-1].event_hash
+    return events
+
+
 class TestSecurityHardeningPersistence:
     """Verify Phase 4 security hardening: advisory xact locking, Safe-Lock fail-closed, and concurrent idempotency."""
 
@@ -593,7 +643,7 @@ class TestSecurityHardeningPersistence:
         self,
         pg_session_factory: sessionmaker[Session],
     ) -> None:
-        """PostgreSQL advisory xact lock serializes concurrent audit writes, preserving an unbroken hash chain."""
+        """PostgreSQL advisory xact lock and append_seq serialize concurrent audit writes without forks."""
         with pg_session_factory() as session:
             payer_id = uuid4()
             _seed_test_payer(session, payer_id)
@@ -603,8 +653,8 @@ class TestSecurityHardeningPersistence:
             roles=frozenset({UserRole.PAYER}),
         )
 
-        num_threads = 5
-        errors = []
+        num_threads = 8
+        errors: list[Exception] = []
 
         def worker(idx: int) -> None:
             try:
@@ -629,21 +679,60 @@ class TestSecurityHardeningPersistence:
 
         assert len(errors) == 0, f"Concurrent audit worker errors: {errors}"
 
-        # Verify cryptographic chain continuity
         with pg_session_factory() as session:
-            events = (
-                session.query(AuditEvent)
-                .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
-                .all()
-            )
-            assert len(events) >= num_threads
+            _assert_unbroken_audit_chain(session, expected_min_events=num_threads)
 
-            # Verify unbroken hash chain
-            for i in range(1, len(events)):
-                assert events[i].prev_hash == events[i - 1].event_hash, (
-                    f"Hash chain broken at event {i}: "
-                    f"prev_hash {events[i].prev_hash} != {events[i - 1].event_hash}"
-                )
+    def test_repeated_concurrent_audit_rounds_across_fresh_states(
+        self,
+        pg_session_factory: sessionmaker[Session],
+    ) -> None:
+        """Repeatedly stress-test 8 concurrent writers across 10 clean database states."""
+        num_rounds = 10
+        num_threads = 8
+
+        for rnd in range(num_rounds):
+            with pg_session_factory() as session:
+                session.execute(delete(AuditEvent))
+                session.execute(delete(IdempotencyRecord))
+                session.execute(delete(LedgerEntry))
+                session.execute(delete(GuardianDecision))
+                session.execute(delete(Payment))
+                session.commit()
+
+                payer_ids = [uuid4() for _ in range(num_threads)]
+                for pid in payer_ids:
+                    _seed_test_payer(session, pid)
+
+            errors: list[Exception] = []
+
+            def worker(idx: int, pids: list[UUID] = payer_ids, round_no: int = rnd) -> None:
+                try:
+                    session = pg_session_factory()
+                    try:
+                        worker_actor = TrustedActorContext(
+                            user_id=pids[idx],
+                            roles=frozenset({UserRole.PAYER}),
+                        )
+                        engine = DurablePaymentEngine(session)
+                        req = PaymentCreateRequest(
+                            beneficiary_id="vendor_stress",
+                            amount_paise=20_000 + idx,
+                            purpose=f"stress round {round_no} worker {idx}",
+                            idempotency_key=f"idem_stress_{round_no}_{idx}_{uuid4().hex[:8]}",
+                        )
+                        with transaction_scope(session):
+                            engine.create_payment(worker_actor, req)
+                    finally:
+                        session.close()
+                except Exception as e:
+                    errors.append(e)
+
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                list(executor.map(worker, range(num_threads)))
+
+            assert not errors, f"Round {rnd} worker errors: {errors}"
+            with pg_session_factory() as session:
+                _assert_unbroken_audit_chain(session, expected_min_events=num_threads)
 
     def test_concurrent_payment_creation_duplicate_idempotency_handling(
         self,
@@ -1531,3 +1620,330 @@ class TestGuardianDeadlineTransaction:
                     other_actor, payment_id, PaymentConfirmRequest(idempotency_key=confirm_key)
                 )
         assert exc_info.value.status_code == 403
+
+
+class TestAuditChainOrderingAndIntegrityRegressions:
+    """Deterministic PostgreSQL audit ordering regressions: inverted timestamps, rollbacks, multi-event, and tampering."""
+
+    def test_inverted_transaction_start_timestamps_preserve_chain_and_never_fork(
+        self,
+        pg_session_factory: sessionmaker[Session],
+    ) -> None:
+        """T1 starts first (older transaction_timestamp) but commits second after T2, followed by T3."""
+        with pg_session_factory() as session:
+            p1, p2, p3 = uuid4(), uuid4(), uuid4()
+            _seed_test_payer(session, p1)
+            _seed_test_payer(session, p2)
+            _seed_test_payer(session, p3)
+
+        t1_started = threading.Event()
+        t2_committed = threading.Event()
+        errors: list[Exception] = []
+
+        def run_t1() -> None:
+            session = pg_session_factory()
+            try:
+                actor = TrustedActorContext(user_id=p1, roles=frozenset({UserRole.PAYER}))
+                engine = DurablePaymentEngine(session)
+                with transaction_scope(session):
+                    # Begin PostgreSQL transaction FIRST so transaction_timestamp() is fixed earlier
+                    session.execute(text("SELECT now()")).scalar_one()
+                    t1_started.set()
+                    assert t2_committed.wait(timeout=10), "Timed out waiting for T2 commit"
+                    engine.create_payment(
+                        actor,
+                        PaymentCreateRequest(
+                            beneficiary_id="vendor_inv_1",
+                            amount_paise=11_000,
+                            purpose="started first committed second",
+                            idempotency_key=f"idem_inv_1_{uuid4().hex[:8]}",
+                        ),
+                    )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                session.close()
+
+        def run_t2() -> None:
+            session = pg_session_factory()
+            try:
+                assert t1_started.wait(timeout=10), "Timed out waiting for T1 start"
+                time.sleep(0.02)
+                actor = TrustedActorContext(user_id=p2, roles=frozenset({UserRole.PAYER}))
+                engine = DurablePaymentEngine(session)
+                with transaction_scope(session):
+                    engine.create_payment(
+                        actor,
+                        PaymentCreateRequest(
+                            beneficiary_id="vendor_inv_2",
+                            amount_paise=12_000,
+                            purpose="started second committed first",
+                            idempotency_key=f"idem_inv_2_{uuid4().hex[:8]}",
+                        ),
+                    )
+                t2_committed.set()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                session.close()
+
+        th1 = threading.Thread(target=run_t1)
+        th2 = threading.Thread(target=run_t2)
+        th1.start()
+        th2.start()
+        th1.join(timeout=15)
+        th2.join(timeout=15)
+        assert not errors, f"Unexpected thread errors: {errors}"
+
+        # T3 appends after both T2 and T1 committed: must link onto T1 (tail), NOT fork from T2!
+        with pg_session_factory() as session:
+            actor3 = TrustedActorContext(user_id=p3, roles=frozenset({UserRole.PAYER}))
+            with transaction_scope(session):
+                DurablePaymentEngine(session).create_payment(
+                    actor3,
+                    PaymentCreateRequest(
+                        beneficiary_id="vendor_inv_3",
+                        amount_paise=13_000,
+                        purpose="third sequential writer",
+                        idempotency_key=f"idem_inv_3_{uuid4().hex[:8]}",
+                    ),
+                )
+
+        with pg_session_factory() as session:
+            events = _assert_unbroken_audit_chain(session, expected_min_events=3)
+            ev_t2, ev_t1, ev_t3 = events[0], events[1], events[2]
+            assert ev_t2.actor_id == p2
+            assert ev_t1.actor_id == p1
+            assert ev_t3.actor_id == p3
+            # Confirm created_at actually inverted between T1 and T2 while append_seq preserved chain order
+            assert ev_t1.created_at <= ev_t2.created_at
+            assert ev_t2.append_seq < ev_t1.append_seq < ev_t3.append_seq
+            assert ev_t1.prev_hash == ev_t2.event_hash
+            assert ev_t3.prev_hash == ev_t1.event_hash
+
+    def test_rollback_leaves_no_audit_row_and_tolerates_sequence_gap(
+        self,
+        pg_session_factory: sessionmaker[Session],
+    ) -> None:
+        """Rolled-back transaction leaves zero phantom rows and subsequent commit links cleanly despite seq gap."""
+        with pg_session_factory() as session:
+            p_id = uuid4()
+            _seed_test_payer(session, p_id, initial_balance=50_000_000)
+
+        actor = TrustedActorContext(user_id=p_id, roles=frozenset({UserRole.PAYER}))
+
+        # 1. Commit event 1
+        with pg_session_factory() as session:
+            with transaction_scope(session):
+                DurablePaymentEngine(session).create_payment(
+                    actor,
+                    PaymentCreateRequest(
+                        beneficiary_id="vendor_rb_1",
+                        amount_paise=10_000,
+                        purpose="committed before rollback",
+                        idempotency_key=f"idem_rb_1_{uuid4().hex[:8]}",
+                    ),
+                )
+
+        # 2. Force rollback after appending audit event (allocates nextval sequence slot then aborts)
+        aborted_key = f"idem_rb_aborted_{uuid4().hex[:8]}"
+        with pg_session_factory() as session:
+            with pytest.raises(RuntimeError, match="forced failure after audit append"):
+                with transaction_scope(session):
+                    DurablePaymentEngine(session).create_payment(
+                        actor,
+                        PaymentCreateRequest(
+                            beneficiary_id="vendor_rb_fail",
+                            amount_paise=20_000,
+                            purpose="must roll back",
+                            idempotency_key=aborted_key,
+                        ),
+                    )
+                    raise RuntimeError("forced failure after audit append")
+
+        # Verify aborted payment and audit record do not exist
+        with pg_session_factory() as session:
+            assert session.query(Payment).filter(Payment.idempotency_key == aborted_key).count() == 0
+            events_mid = _assert_unbroken_audit_chain(session, expected_min_events=1)
+            assert len(events_mid) == 1
+            seq_before_abort = events_mid[0].append_seq
+
+        # 3. Commit event 2 -> sequence has a valid gap (>= seq_before_abort + 2), chain remains intact
+        with pg_session_factory() as session:
+            with transaction_scope(session):
+                DurablePaymentEngine(session).create_payment(
+                    actor,
+                    PaymentCreateRequest(
+                        beneficiary_id="vendor_rb_2",
+                        amount_paise=30_000,
+                        purpose="committed after rollback",
+                        idempotency_key=f"idem_rb_2_{uuid4().hex[:8]}",
+                    ),
+                )
+
+        with pg_session_factory() as session:
+            events_after = _assert_unbroken_audit_chain(session, expected_min_events=2)
+            assert len(events_after) == 2
+            assert events_after[1].append_seq >= seq_before_abort + 2
+
+    def test_multi_event_single_transaction_and_tamper_detection(
+        self,
+        pg_session_factory: sessionmaker[Session],
+    ) -> None:
+        """Multiple audit events in one transaction share created_at but get strict append_seq order; SQL tamper is caught."""
+        with pg_session_factory() as session:
+            p_id = uuid4()
+            _seed_test_payer(session, p_id, initial_balance=50_000_000)
+
+        actor = TrustedActorContext(user_id=p_id, roles=frozenset({UserRole.PAYER}))
+
+        with pg_session_factory() as session:
+            engine = DurablePaymentEngine(session)
+            with transaction_scope(session):
+                ev1 = engine._append_audit_event("MULTI_STEP_ONE", actor, payload={"step": 1})
+                ev2 = engine._append_audit_event("MULTI_STEP_TWO", actor, payload={"step": 2})
+
+            assert ev1.append_seq < ev2.append_seq
+            assert ev2.prev_hash == ev1.event_hash
+
+        with pg_session_factory() as session:
+            events = _assert_unbroken_audit_chain(session, expected_min_events=2)
+            assert events[0].created_at == events[1].created_at
+
+            # Tamper payload directly in PostgreSQL -> verify_audit_chain must detect!
+            target_id = events[0].id
+            session.execute(
+                text("UPDATE audit_events SET event_type = 'TAMPERED_EVENT' WHERE id = :id"),
+                {"id": target_id},
+            )
+            session.commit()
+
+            valid, total, _ = DurablePaymentEngine(session).verify_audit_chain()
+            assert valid is False
+            assert total == 2
+
+    def test_concurrent_mixed_payment_lifecycle_and_audit_integrity(
+        self,
+        pg_session_factory: sessionmaker[Session],
+    ) -> None:
+        """Simultaneous lifecycle flows (create, warning ack, guardian approve/reject, cancel, confirm) keep ledger and audit valid."""
+        with pg_session_factory() as session:
+            payers = [SYNTHETIC_PAYER_ID, uuid4(), uuid4(), uuid4()]
+            _seed_test_payer(session, payers[0], initial_balance=50_000_000)
+            _seed_test_guardian(session, SYNTHETIC_GUARDIAN_ID)
+            for pid in payers[1:]:
+                _seed_test_payer(session, pid, initial_balance=20_000_000)
+
+        def run_flow(idx: int) -> None:
+            session = pg_session_factory()
+            try:
+                payer_id = payers[idx]
+                payer_actor = TrustedActorContext(user_id=payer_id, roles=frozenset({UserRole.PAYER}))
+                guardian_actor = TrustedActorContext(
+                    user_id=SYNTHETIC_GUARDIAN_ID,
+                    roles=frozenset({UserRole.GUARDIAN}),
+                )
+                engine = DurablePaymentEngine(session)
+
+                if idx == 0:
+                    # High-risk -> guardian approve -> payer confirm (EXECUTED), then second high-risk -> guardian reject (REJECTED)
+                    with transaction_scope(session):
+                        p_app = engine.create_payment(
+                            payer_actor,
+                            PaymentCreateRequest(
+                                beneficiary_id="supplier_new",
+                                amount_paise=5_500_000,
+                                purpose="kyc verification lifecycle",
+                                idempotency_key=f"life_0a_{uuid4().hex[:8]}",
+                            ),
+                        )
+                    with transaction_scope(session):
+                        engine.record_guardian_decision(
+                            guardian_actor, p_app.id, GuardianDecisionRequest(approved=True)
+                        )
+                    with transaction_scope(session):
+                        engine.confirm_payment(
+                            payer_actor, p_app.id, PaymentConfirmRequest(idempotency_key=f"conf_0a_{uuid4().hex[:8]}")
+                        )
+
+                    with transaction_scope(session):
+                        p_rej = engine.create_payment(
+                            payer_actor,
+                            PaymentCreateRequest(
+                                beneficiary_id="supplier_new",
+                                amount_paise=5_500_000,
+                                purpose="kyc rejection test",
+                                idempotency_key=f"life_0b_{uuid4().hex[:8]}",
+                            ),
+                        )
+                    with transaction_scope(session):
+                        engine.record_guardian_decision(
+                            guardian_actor, p_rej.id, GuardianDecisionRequest(approved=False)
+                        )
+                elif idx == 1:
+                    # Tier 1 Warning -> warning ack -> confirm (EXECUTED)
+                    with transaction_scope(session):
+                        p = engine.create_payment(
+                            payer_actor,
+                            PaymentCreateRequest(
+                                beneficiary_id="supplier_new",
+                                amount_paise=100_000,
+                                purpose="urgent kyc verification update",
+                                idempotency_key=f"life_1_{uuid4().hex[:8]}",
+                            ),
+                        )
+                    assert p.status == PaymentStatus.AWAITING_WARNING.value
+                    with transaction_scope(session):
+                        engine.acknowledge_warning(payer_actor, p.id)
+                    with transaction_scope(session):
+                        engine.confirm_payment(
+                            payer_actor, p.id, PaymentConfirmRequest(idempotency_key=f"conf_1_{uuid4().hex[:8]}")
+                        )
+                elif idx == 2:
+                    # High-risk -> payer cancel (CANCELLED)
+                    with transaction_scope(session):
+                        p = engine.create_payment(
+                            payer_actor,
+                            PaymentCreateRequest(
+                                beneficiary_id="supplier_new",
+                                amount_paise=5_500_000,
+                                purpose="kyc cancel test",
+                                idempotency_key=f"life_2_{uuid4().hex[:8]}",
+                            ),
+                        )
+                    with transaction_scope(session):
+                        engine.cancel_payment(payer_actor, p.id)
+                else:
+                    # Tier 0 Routine -> payer confirm (EXECUTED)
+                    with transaction_scope(session):
+                        p = engine.create_payment(
+                            payer_actor,
+                            PaymentCreateRequest(
+                                beneficiary_id="b1",
+                                amount_paise=250_000,
+                                purpose="routine office stationery",
+                                idempotency_key=f"life_3_{uuid4().hex[:8]}",
+                            ),
+                        )
+                    assert p.status == PaymentStatus.READY_TO_EXECUTE.value
+                    with transaction_scope(session):
+                        engine.confirm_payment(
+                            payer_actor, p.id, PaymentConfirmRequest(idempotency_key=f"conf_3_{uuid4().hex[:8]}")
+                        )
+            finally:
+                session.close()
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(run_flow, range(4)))
+
+        with pg_session_factory() as session:
+            # Flows produce: (3+2) + 3 + 2 + 2 = 12 audit events atomically chained
+            _assert_unbroken_audit_chain(session, expected_min_events=12)
+            p0_acc = session.query(MockAccount).filter(MockAccount.owner_id == payers[0]).one()
+            p1_acc = session.query(MockAccount).filter(MockAccount.owner_id == payers[1]).one()
+            p2_acc = session.query(MockAccount).filter(MockAccount.owner_id == payers[2]).one()
+            p3_acc = session.query(MockAccount).filter(MockAccount.owner_id == payers[3]).one()
+            assert p0_acc.balance_paise == 50_000_000 - 5_500_000
+            assert p1_acc.balance_paise == 20_000_000 - 100_000
+            assert p2_acc.balance_paise == 20_000_000
+            assert p3_acc.balance_paise == 20_000_000 - 250_000
