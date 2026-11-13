@@ -10,6 +10,7 @@ import { isLocale, translator } from '../src/locales/messages.ts'
 import { parsePayment } from '../src/services/paymentResponse.ts'
 import { isLoopbackHost, isRealBackendMode } from '../src/services/backendMode.ts'
 import { accountApi, AccountError } from '../src/services/accountApi.ts'
+import { AdminApiError, razorpayApi, validateRazorpayTestKey } from '../src/services/adminApi.ts'
 
 const demoTokens = { payer: 'payer', guardian: 'guardian' }
 const coerced = { beneficiary_id: 'supplier_new', amount_paise: 5_500_000, purpose: 'kyc_verification', idempotency_key: 'attempt-1' }
@@ -49,7 +50,7 @@ async function fixture(t) {
   }
 
   return {
-    call, account,
+    call, account, origin,
     create: async (input) => (await call('/payments', demoTokens.payer, input)).body,
     advance: (ms) => { now += ms },
   }
@@ -522,8 +523,14 @@ test('admin login, role isolation, synthetic payer context and hash-chained audi
   assert.ok(verifyRes.body.total_events >= 4)
 })
 
-test('Razorpay Test Mode merchant sandbox isolation and admin verification', async (t) => {
-  const { call, account } = await fixture(t)
+test('Razorpay Test Mode merchant sandbox isolation, idempotency, key validation, and admin verification', async (t) => {
+  const { call, account, origin } = await fixture(t)
+
+  // 0. Live key validation guard must always reject rzp_live_* and malformed keys
+  assert.equal(validateRazorpayTestKey('rzp_test_valid123'), 'rzp_test_valid123')
+  assert.throws(() => validateRazorpayTestKey('rzp_live_forbidden'), AdminApiError)
+  assert.throws(() => validateRazorpayTestKey(''), AdminApiError)
+  assert.throws(() => validateRazorpayTestKey('rzp_test_'), AdminApiError)
 
   // 1. Obtain admin session
   const adminRes = await account('/session', { role: 'admin', sample: true })
@@ -537,36 +544,80 @@ test('Razorpay Test Mode merchant sandbox isolation and admin verification', asy
   const guardianOrder = await call('/sandbox/razorpay/orders', 'guardian', { amount_paise: 50_000 })
   assert.equal(guardianOrder.code, 403)
 
-  // 3. Admin can inspect config (public key only)
-  const configRes = await call('/sandbox/razorpay/config', adminToken)
-  assert.equal(configRes.code, 200)
-  assert.ok(configRes.body.key_id.startsWith('rzp_test_'))
+  const payerConfig = await call('/sandbox/razorpay/config', 'payer')
+  assert.equal(payerConfig.code, 403)
 
-  // 4. Admin creates an isolated merchant test order
-  const orderRes = await call('/sandbox/razorpay/orders', adminToken, {
-    amount_paise: 250_000,
-    currency: 'INR',
-  })
-  assert.equal(orderRes.code, 200)
-  assert.ok(orderRes.body.id.startsWith('rzp_ord_'))
-  assert.ok(orderRes.body.razorpay_order_id.startsWith('order_'))
-  assert.equal(orderRes.body.amount_paise, 250_000)
-  assert.equal(orderRes.body.status, 'created')
+  // 3. Admin can inspect config via razorpayApi (public test key only, no hardcoded secret)
+  const config = await razorpayApi.getConfig(adminToken, origin)
+  assert.equal(config.enabled, true)
+  assert.equal(config.mode, 'test')
+  assert.ok(config.key_id.startsWith('rzp_test_'))
+  assert.equal('key_secret' in config, false)
 
-  // 5. Admin verifies checkout signature
-  const verifyRes = await call('/sandbox/razorpay/verify', adminToken, {
-    razorpay_order_id: orderRes.body.razorpay_order_id,
+  // 4. Admin creates an isolated merchant test order with idempotency
+  const idemKey = 'idem-test-order-1'
+  const orderRes = await razorpayApi.createOrder(
+    adminToken,
+    250_000,
+    { receipt: 'rcpt_unit_01', notes: { purpose: 'merchant_checkout_test' }, idempotencyKey: idemKey },
+    origin,
+  )
+  assert.ok(orderRes.id.startsWith('rzp_ord_'))
+  assert.ok(orderRes.razorpay_order_id.startsWith('order_'))
+  assert.equal(orderRes.amount_paise, 250_000)
+  assert.equal(orderRes.status, 'created')
+  assert.ok(orderRes.key_id.startsWith('rzp_test_'))
+
+  // Reusing same idempotency key with same payload returns cached order
+  const replayOrder = await razorpayApi.createOrder(
+    adminToken,
+    250_000,
+    { receipt: 'rcpt_unit_01', notes: { purpose: 'merchant_checkout_test' }, idempotencyKey: idemKey },
+    origin,
+  )
+  assert.equal(replayOrder.razorpay_order_id, orderRes.razorpay_order_id)
+
+  // Reusing same idempotency key with conflicting amount fails with 409
+  await assert.rejects(
+    () =>
+      razorpayApi.createOrder(
+        adminToken,
+        300_000,
+        { receipt: 'rcpt_unit_01', notes: { purpose: 'merchant_checkout_test' }, idempotencyKey: idemKey },
+        origin,
+      ),
+    (err) => err instanceof AccountError && err.status === 409,
+  )
+
+  // 5. Invalid signature fails closed with 400 and never marks order verified
+  const badVerify = await call('/sandbox/razorpay/verify', adminToken, {
+    razorpay_order_id: orderRes.razorpay_order_id,
     razorpay_payment_id: 'pay_test_1234567890',
-    razorpay_signature: 'a'.repeat(64),
+    razorpay_signature: '0'.repeat(64),
   })
-  assert.equal(verifyRes.code, 200)
-  assert.equal(verifyRes.body.status, 'captured')
-  assert.equal(verifyRes.body.razorpay_order_id, orderRes.body.razorpay_order_id)
+  assert.equal(badVerify.code, 400)
 
-  // 6. Admin inspects order status
-  const statusRes = await call(`/sandbox/razorpay/orders/${orderRes.body.razorpay_order_id}`, adminToken)
-  assert.equal(statusRes.code, 200)
-  assert.equal(statusRes.body.id, orderRes.body.razorpay_order_id)
+  // 6. Admin verifies valid checkout signature via backend
+  const verifyRes = await razorpayApi.verifyPayment(
+    adminToken,
+    {
+      razorpay_order_id: orderRes.razorpay_order_id,
+      razorpay_payment_id: 'pay_test_1234567890',
+      razorpay_signature: 'a'.repeat(64),
+    },
+    origin,
+  )
+  assert.equal(verifyRes.verified, true)
+  assert.equal(verifyRes.reconciled_with_provider, true)
+  assert.equal(verifyRes.status, 'paid')
+  assert.equal(verifyRes.razorpay_order_id, orderRes.razorpay_order_id)
+
+  // 7. Admin inspects persisted order status & payment history
+  const statusRes = await razorpayApi.getOrderStatus(adminToken, orderRes.razorpay_order_id, origin)
+  assert.equal(statusRes.razorpay_order_id, orderRes.razorpay_order_id)
+  assert.equal(statusRes.status, 'paid')
+  assert.equal(statusRes.payments.length, 1)
+  assert.equal(statusRes.payments[0].id, 'pay_test_1234567890')
 })
 
 test('parsePayment accepts FastAPI FullPaymentView without risk_score/reason_codes and rejects invalid types', () => {

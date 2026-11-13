@@ -482,3 +482,84 @@ test('separate enrolled guardian declines, accepts, and loses access after revoc
   await payer.getByRole('heading', { name: 'Review window closed' }).waitFor()
   assert.equal(await payer.getByRole('button', { name: 'Confirm simulated payment' }).count(), 0)
 })
+
+test('admin Mode B Razorpay Test Mode creates order, rejects invalid signature, handles checkout dismissal and verified completion, and fails closed on 503', { timeout: 30_000 }, async (t) => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  })
+  t.after(() => browser.close())
+  const context = await browser.newContext()
+  const admin = await context.newPage()
+
+  await admin.goto(origin + '/admin/login')
+  await admin.getByRole('button', { name: 'Open sample admin' }).click()
+  await admin.getByRole('heading', { name: /Payment Testing/i }).waitFor()
+
+  // Switch to Mode B — Razorpay Test Mode
+  await admin.getByRole('tab', { name: /Mode B — Razorpay Test Mode/i }).click()
+  await admin.getByText('TEST ONLY · Sandbox Active').waitFor()
+  await admin.getByText('rzp_test_mock_sandbox_key').first().waitFor()
+
+  // Step 1: Create ₹250.00 Test Order
+  await admin.getByLabel('Amount (INR)').fill('250.00')
+  await admin.getByLabel('Receipt reference (optional)').fill('rcpt_browser_001')
+  await admin.getByRole('button', { name: 'Create Test Order' }).click()
+  await admin.getByText('Test order created on backend.').waitFor()
+
+  const orderId = (await admin.locator('.admin-razorpay-fields dd code').first().innerText()).trim()
+  assert.match(orderId, /^order_/)
+
+  // Step 2 (Negative): Invalid signature is rejected server-side cleanly
+  await admin.getByText('Server HMAC Verification & Signature Diagnostic').click()
+  await admin.getByLabel('Razorpay Payment ID').fill('pay_browser_invalid')
+  await admin.getByLabel('HMAC-SHA256 Signature (64 hex chars)').fill('0'.repeat(64))
+  await admin.getByRole('button', { name: 'Verify Signature on Backend' }).click()
+  await admin.getByRole('alert').filter({ hasText: /Invalid payment signature/i }).waitFor()
+  assert.equal(await admin.getByText('Verified & Reconciled', { exact: true }).count(), 0)
+
+  // Step 3: Inject deterministic test double for window.Razorpay Checkout SDK and test dismissal first
+  await admin.evaluate(() => {
+    window.__rzpMode = 'dismiss'
+    window.Razorpay = class MockRazorpayCheckout {
+      constructor(opts) {
+        this.opts = opts
+      }
+      on() {}
+      open() {
+        if (window.__rzpMode === 'dismiss') {
+          this.opts.modal?.ondismiss?.()
+          return
+        }
+        void this.opts.handler({
+          razorpay_order_id: this.opts.order_id,
+          razorpay_payment_id: 'pay_browser_verified_1',
+          razorpay_signature: 'b'.repeat(64),
+        })
+      }
+    }
+  })
+
+  await admin.getByRole('button', { name: 'Open Razorpay Test Checkout' }).click()
+  await admin.getByText(/Checkout dismissed before completion/i).waitFor()
+  assert.equal(await admin.getByText('Verified & Reconciled', { exact: true }).count(), 0)
+
+  // Step 4: Trigger successful checkout callback -> backend HMAC verify -> Verified & Reconciled
+  await admin.evaluate(() => {
+    window.__rzpMode = 'success'
+  })
+  await admin.getByRole('button', { name: 'Open Razorpay Test Checkout' }).click()
+  await admin.getByText('Verified & Reconciled', { exact: true }).waitFor()
+  await admin.getByText('pay_browser_verified_1').first().waitFor()
+
+  // Step 5: Simulate backend unavailable / disabled (503) -> fails closed
+  await admin.route('**/api/v2/sandbox/razorpay/config', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Razorpay sandbox unavailable: disabled' }),
+    }),
+  )
+  await admin.getByRole('button', { name: 'Refresh status' }).click()
+  await admin.getByText('TEST ONLY · Backend Disabled / Unavailable').waitFor()
+  assert.equal(await admin.getByRole('button', { name: 'Create Test Order' }).isDisabled(), true)
+})

@@ -183,6 +183,55 @@ def test_sandbox_config_rejects_live_key(monkeypatch):
         load_sandbox_config()
 
 
+def test_config_endpoint_requires_auth_and_admin_role(client):
+    assert client.get("/api/v2/sandbox/razorpay/config").status_code == 401
+    for token in (SYNTHETIC_PAYER_TOKEN, SYNTHETIC_GUARDIAN_TOKEN, SYNTHETIC_ANALYST_TOKEN):
+        res = client.get(
+            "/api/v2/sandbox/razorpay/config",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert res.status_code == 403
+
+
+def test_config_endpoint_returns_only_public_test_key(client):
+    res = client.get(
+        "/api/v2/sandbox/razorpay/config",
+        headers={"Authorization": f"Bearer {SYNTHETIC_ADMIN_TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {"enabled": True, "mode": "test", "key_id": TEST_KEY_ID}
+    assert "key_secret" not in body
+    assert "webhook_secret" not in body
+    assert TEST_KEY_SECRET not in res.text
+    assert TEST_WEBHOOK_SECRET not in res.text
+
+
+def test_config_endpoint_fails_closed_when_disabled_or_live_key(monkeypatch):
+    monkeypatch.delenv("PAUSEGUARD_RAZORPAY_TEST_ENABLED", raising=False)
+    fresh_service = get_razorpay_service()
+    fresh_service.reset_for_testing()
+    fresh_service._config = None
+    settings = Settings(environment="test", mode="mock", allow_demo_auth=True)
+    fresh_client = TestClient(create_app(settings))
+
+    res_disabled = fresh_client.get(
+        "/api/v2/sandbox/razorpay/config",
+        headers={"Authorization": f"Bearer {SYNTHETIC_ADMIN_TOKEN}"},
+    )
+    assert res_disabled.status_code == 503
+
+    monkeypatch.setenv("PAUSEGUARD_RAZORPAY_TEST_ENABLED", "true")
+    monkeypatch.setenv("RZP_TEST_KEY_ID", "rzp_live_forbidden999")
+    monkeypatch.setenv("RZP_TEST_KEY_SECRET", "forbidden_secret")
+    res_live = fresh_client.get(
+        "/api/v2/sandbox/razorpay/config",
+        headers={"Authorization": f"Bearer {SYNTHETIC_ADMIN_TOKEN}"},
+    )
+    assert res_live.status_code == 503
+    assert "Test Mode" in res_live.json().get("detail", "")
+
+
 def test_unauthenticated_requests_are_rejected(client):
     res = client.post(
         "/api/v2/sandbox/razorpay/orders",

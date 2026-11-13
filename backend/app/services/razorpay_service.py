@@ -23,6 +23,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.auth.schemas import (
+    RazorpayConfigResponse,
     RazorpayOrderCreateRequest,
     RazorpayOrderResponse,
     RazorpayVerifyRequest,
@@ -90,6 +91,24 @@ class RazorpayMerchantService:
             self._mock_payments.clear()
             self._idempotency_records.clear()
             self._replay_guard = WebhookReplayGuard(max_events=10_000)
+
+    def get_public_config(self, actor: TrustedActorContext) -> RazorpayConfigResponse:
+        """Return validated public Razorpay Test Mode key_id (never secrets) for Admin UI."""
+        try:
+            require_sandbox_admin(actor)
+        except RazorpaySandboxError as e:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Sandbox authorization failed: {e}",
+            )
+
+        config = self._resolve_config()
+        if not config.key_id.startswith("rzp_test_") or config.key_id.startswith("rzp_live_"):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Razorpay sandbox unavailable: Only Test Mode keys (rzp_test_*) are allowed",
+            )
+        return RazorpayConfigResponse(enabled=True, mode="test", key_id=config.key_id)
 
     def create_order(
         self,
