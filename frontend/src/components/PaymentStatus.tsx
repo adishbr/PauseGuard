@@ -6,7 +6,18 @@ import { languages, translator } from '../locales/messages.ts'
 import type { Locale, Translate } from '../locales/messages.ts'
 import { formatRupees } from '../services/demoSession.ts'
 import { isRealBackendMode } from '../services/backendMode.ts'
-import { activateFallback, guardianDecision, payerAction, paymentError } from '../services/paymentApi.ts'
+import {
+  activateBackupGuardian,
+  activateFallback,
+  createPaymentAppeal,
+  guardianDecision,
+  listPaymentAppeals,
+  payerAction,
+  paymentError,
+  retryPayment,
+  verifyStepUp,
+} from '../services/paymentApi.ts'
+import type { V5PaymentAppeal } from '../services/paymentApi.ts'
 import { terminalStatuses } from '../types/payment.ts'
 import type { Role, Status } from '../types/payment.ts'
 import { Icon } from './Icon.tsx'
@@ -82,13 +93,17 @@ function Reference({ id, t }: { id: string; t: Translate }) {
   )
 }
 
-export function PaymentStatus({ role, token, id, locale, onClose }: {
-  role: Role; token: string; id: string; locale: Locale; onClose: () => void
+export function PaymentStatus({ role, token, id, locale, onClose, onSelectPayment }: {
+  role: Role; token: string; id: string; locale: Locale; onClose: () => void; onSelectPayment?: (nextId: string) => void
 }) {
   const t = translator(locale)
   const { snapshot, error, checking, accept, refresh } = usePayment(role, token, id)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<{ status: Status; key: MessageKey }>()
+  const [appeals, setAppeals] = useState<V5PaymentAppeal[]>([])
+  const [appealReason, setAppealReason] = useState('')
+  const [v5StatusNote, setV5StatusNote] = useState('')
+  const [v5ErrorNote, setV5ErrorNote] = useState('')
   const inFlight = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
   const checkedDeadline = useRef<string | null>(null)
@@ -114,6 +129,99 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
       }
     }
   }, [remaining, deadline, checking, error, busy, role, token, id, accept, refresh])
+
+  const appealEligible =
+    isRealBackendMode() &&
+    role === 'payer' &&
+    (status === 'REJECTED' || status === 'EXPIRED' || status === 'FAILED' || status === 'AWAITING_FALLBACK_REVIEW')
+
+  useEffect(() => {
+    if (!appealEligible) return
+    let active = true
+    void listPaymentAppeals(token, id)
+      .then((rows) => { if (active) setAppeals(rows) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [appealEligible, id, token])
+
+  async function runStepUp() {
+    if (inFlight.current || busy) return
+    inFlight.current = true
+    setBusy(true)
+    setV5ErrorNote('')
+    setV5StatusNote('')
+    try {
+      const updated = await verifyStepUp(token, id)
+      accept(updated)
+      setV5StatusNote('Step-up challenge verified.')
+    } catch {
+      setV5ErrorNote('Step-up verification failed or expired.')
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function runBackupFailover() {
+    if (inFlight.current || busy) return
+    inFlight.current = true
+    setBusy(true)
+    setV5ErrorNote('')
+    setV5StatusNote('')
+    try {
+      const updated = await activateBackupGuardian(token, id)
+      accept(updated)
+      setV5StatusNote('Routed payment review to your enrolled backup guardian.')
+    } catch {
+      setV5ErrorNote('No active backup guardian enrolled for failover.')
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function submitAppeal() {
+    if (inFlight.current || busy || appealReason.trim().length < 5) {
+      setV5ErrorNote('Enter an explanation (at least 5 characters) before submitting an appeal.')
+      return
+    }
+    inFlight.current = true
+    setBusy(true)
+    setV5ErrorNote('')
+    setV5StatusNote('')
+    try {
+      const created = await createPaymentAppeal(token, id, { reason: appealReason })
+      setAppeals((prev) => [created, ...prev])
+      setAppealReason('')
+      setV5StatusNote('Appeal submitted for independent analyst review.')
+    } catch {
+      setV5ErrorNote('Could not submit appeal for this transaction.')
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
+
+  async function runSafeRetry() {
+    if (inFlight.current || busy) return
+    inFlight.current = true
+    setBusy(true)
+    setV5ErrorNote('')
+    setV5StatusNote('')
+    try {
+      const child = await retryPayment(token, id)
+      if (onSelectPayment) {
+        onSelectPayment(child.payment.id)
+      } else {
+        accept(child)
+      }
+    } catch {
+      setV5ErrorNote('Safe retry unavailable until an analyst approves the appeal (if rejected) or policy permits.')
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
+  }
 
   async function act(action: Action) {
     if (inFlight.current || checking || error || !status) return
@@ -276,9 +384,19 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
                   {t('confirm')} <Icon name="arrow" size={18} />
                 </button>
               )}
+              {status === 'AWAITING_STEP_UP' && isRealBackendMode() && (
+                <button type="button" className="primary" disabled={disabled} onClick={() => void runStepUp()}>
+                  Complete step-up verification <Icon name="arrow" size={18} />
+                </button>
+              )}
               {status === 'AWAITING_WARNING' && (
                 <button type="button" className="primary" disabled={disabled} onClick={() => void act('warning/acknowledge')}>
                   {t('acknowledge')} <Icon name="arrow" size={18} />
+                </button>
+              )}
+              {(status === 'AWAITING_GUARDIAN' || status === 'AWAITING_FALLBACK_REVIEW') && isRealBackendMode() && (
+                <button type="button" className="secondary" disabled={busy} onClick={() => void runBackupFailover()}>
+                  Route to Backup Guardian
                 </button>
               )}
               <button type="button" className="secondary" disabled={disabled} onClick={() => void act('cancel')}>
@@ -322,6 +440,48 @@ export function PaymentStatus({ role, token, id, locale, onClose }: {
             </button>
           )}
         </div>
+
+        {v5StatusNote && <p role="status" className="notice" style={{ marginTop: '0.75rem' }}>{v5StatusNote}</p>}
+        {v5ErrorNote && <p role="alert" className="notice" style={{ marginTop: '0.75rem' }}>{v5ErrorNote}</p>}
+
+        {appealEligible && (
+          <div className="enrollment-item" style={{ marginTop: '1rem' }}>
+            <h3>False-Alert Appeal &amp; Safe Retry</h3>
+            <p className="field-help">
+              If this block or timeout happened on a verified legitimate payment, submit an appeal for analyst review or trigger a policy-checked retry.
+            </p>
+            <label style={{ marginTop: '0.5rem' }}>
+              Appeal explanation
+              <input
+                value={appealReason}
+                onChange={(e) => setAppealReason(e.target.value)}
+                placeholder="e.g. Verified invoice with supplier offline"
+              />
+            </label>
+            <div className="actions" style={{ marginTop: '0.6rem' }}>
+              <button type="button" className="secondary" disabled={busy} onClick={() => void submitAppeal()}>
+                Submit false-alert appeal
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || (status === 'REJECTED' && !appeals.some((a) => a.status === 'APPROVED_RETRY_ELIGIBLE'))}
+                onClick={() => void runSafeRetry()}
+              >
+                Safe retry payment
+              </button>
+            </div>
+            {appeals.length > 0 && (
+              <ul className="reasons" style={{ marginTop: '0.65rem' }}>
+                {appeals.map((a) => (
+                  <li key={a.appeal_id}>
+                    <strong>{a.status}</strong>: {a.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         {payment && role === 'guardian' && (
           <div className="guardian-privacy-shield-banner">

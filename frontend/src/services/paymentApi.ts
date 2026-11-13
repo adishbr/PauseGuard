@@ -135,6 +135,62 @@ export const payerAction = (token: string, id: string, action: 'warning/acknowle
 export const activateFallback = (token: string, id: string) =>
   request('payer', token, `${paymentPath(id)}/fallback/activate`, { id, body: {} })
 
+export const verifyStepUp = (token: string, id: string, assertionToken = 'webauthn_local_stub_verified') =>
+  request('payer', token, `${paymentPath(id)}/step-up/verify`, {
+    id,
+    body: { challenge_method: 'webauthn_stub', assertion_token: assertionToken },
+  })
+
+export const activateBackupGuardian = (token: string, id: string) =>
+  request('payer', token, `${paymentPath(id)}/fallback/backup`, { id, body: {} })
+
+export interface V5PaymentAppeal {
+  appeal_id: string
+  payment_id: string
+  payer_id: string
+  status: 'OPEN' | 'APPROVED_RETRY_ELIGIBLE' | 'REJECTED'
+  reason: string
+  evidence_note?: string | null
+  resolved_by_id?: string | null
+  resolution_note?: string | null
+  resolved_at?: string | null
+  created_at: string
+}
+
+export async function listPaymentAppeals(token: string, id: string): Promise<V5PaymentAppeal[]> {
+  const response = await fetch(`/api/v2${paymentPath(id)}/appeals`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  })
+  if (!response.ok) throw httpError(response.status)
+  return (await response.json()) as V5PaymentAppeal[]
+}
+
+export async function createPaymentAppeal(
+  token: string,
+  id: string,
+  payload: { reason: string; evidenceNote?: string },
+): Promise<V5PaymentAppeal> {
+  const response = await fetch(`/api/v2${paymentPath(id)}/appeals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      reason: payload.reason.trim(),
+      ...(payload.evidenceNote?.trim() ? { evidence_note: payload.evidenceNote.trim() } : {}),
+    }),
+  })
+  if (!response.ok) throw httpError(response.status)
+  return (await response.json()) as V5PaymentAppeal
+}
+
+export const retryPayment = (token: string, id: string, purpose?: string) =>
+  request('payer', token, `${paymentPath(id)}/retry`, {
+    body: {
+      idempotency_key: `retry-${id}-${Date.now()}`,
+      ...(purpose?.trim() ? { purpose: purpose.trim() } : {}),
+    },
+  })
+
 export const guardianDecision = (token: string, id: string, decision: 'approve' | 'reject') =>
   request('guardian', token, `${paymentPath(id)}/guardian/decision`, {
     id,

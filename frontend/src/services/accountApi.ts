@@ -547,6 +547,10 @@ export const accountApi = {
     return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/revoke`, token, {})
   },
 
+  suspendV5Invitation: async (token: string, invitationId: string, reason = 'suspected_compromise'): Promise<V5GuardianInvitation> => {
+    return request<V5GuardianInvitation>('/api/v2', `/guardian/invitations/${encodeURIComponent(invitationId)}/suspend`, token, { reason })
+  },
+
   save: async (token: string, changes: ProfileUpdate): Promise<DemoProfile> => {
     if (!isRealBackendMode()) {
       return request<DemoProfile>(demoAccountPath, '/profile', token, changes)

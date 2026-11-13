@@ -192,7 +192,7 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
     }
   }
 
-  async function handleInvitationStatusAction(invitationId: string, action: 'decline' | 'revoke') {
+  async function handleInvitationStatusAction(invitationId: string, action: 'decline' | 'revoke' | 'suspend') {
     if (acting.current) return
     acting.current = true
     setBusy(true)
@@ -202,6 +202,9 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
       if (action === 'decline') {
         await accountApi.declineV5Invitation(token, invitationId)
         setMessage('Invitation declined.')
+      } else if (action === 'suspend') {
+        await accountApi.suspendV5Invitation(token, invitationId, 'suspected_compromise')
+        setMessage('Guardian suspended immediately for security review.')
       } else {
         await accountApi.revokeV5Invitation(token, invitationId)
         setMessage('Guardian link revoked immediately.')
@@ -415,6 +418,16 @@ export function Enrollment({ profile, token }: { profile: DemoProfile; token: st
 
                 {(inv.status === 'PENDING' || inv.status === 'ACTIVE') && (payer || inv.status === 'ACTIVE') && (
                   <div className="actions" style={{ marginTop: '0.65rem' }}>
+                    {payer && inv.status === 'ACTIVE' && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => void handleInvitationStatusAction(inv.invitation_id, 'suspend')}
+                      >
+                        Suspend (Suspected Compromise)
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="secondary"
