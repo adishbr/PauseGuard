@@ -1,6 +1,6 @@
 # PauseGuard V4.1 — Final Release & Demonstration Runbook
 
-**Release Candidate Branch:** `release/pauseguard-v4-1-final`  
+**Release Candidate Branch:** `fix/hydrogen-final-v4-1-closure`  
 **Integration Worktree:** `D:\PauseGuard-Hydrogen-Integration`
 
 ---
@@ -74,7 +74,19 @@ $env:PAUSEGUARD_POSTGRES_TEST_PASSWORD = 'ci_only_disposable_password'
    - Or click **Reject payment** → verify both windows transition to terminal **Payment rejected** (`REJECTED`).
 5. **Payer Final Confirmation:** After guardian approval, click **Confirm simulated payment** in the Payer window → verify **Simulated payment completed** (`EXECUTED`).
 6. **Timeout Fallback (30s):** Create another high-risk payment and wait 30 seconds without guardian action → verify automatic transition to **Review window closed** (`AWAITING_FALLBACK_REVIEW`) with zero funds debited.
-7. **Safe-Lock:** Navigate to `/payer/safety`, enable **Safe-Lock**, and save (`POST /api/v2/safe-lock`) → verify payment creation/confirmation is blocked (`423 Locked`).
+7. **Safe-Lock:** Navigate to `/payer/profile`, click **Turn on Safe-Lock** (`POST /api/v2/safe-lock`) → verify payment creation/confirmation is blocked (`423 Locked`).
 8. **Audit Verification:** Query `GET /api/v2/payments/{payment_id}/events` (or inspect via Admin Sandbox) to view the SHA-256 hash-chained (`prev_hash` → `event_hash`) audit trail.
 9. **Risk Advisory & Policy Lab:** Call `POST /api/v2/risk/advice` (advisory signals with `can_authorize_payment: false`) and `POST /api/v2/policy-lab/simulate` (comparing Baseline A, Baseline B, and PauseGuard Policy C on held-out synthetic test scenarios).
 10. **Admin Razorpay Test Mode:** Open `http://127.0.0.1:5173/admin/login` (isolated merchant checkout sandbox under `/api/v2/sandbox/razorpay/*`, completely separate from the mock UPI P2P ledger).
+
+---
+
+## 4. Tracked Real-Backend Playwright E2E Suite
+With Mode B servers running (`127.0.0.1:8000` FastAPI + `127.0.0.1:5173` Vite `VITE_USE_REAL_BACKEND=true`):
+
+```powershell
+cd frontend
+node --test tests/e2e-real-backend.test.mjs
+```
+(Optionally set `PLAYWRIGHT_MODULE` and `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when using a custom Chromium/Playwright binary path.)
+

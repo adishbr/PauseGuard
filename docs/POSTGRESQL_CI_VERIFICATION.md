@@ -1,11 +1,11 @@
 # PostgreSQL Integration & CI Verification Report (V4.1)
 
-**Branch:** `release/pauseguard-v4-1-final`  
+**Branch:** `fix/hydrogen-final-v4-1-closure` (from `release/pauseguard-v4-1-final`)  
 **Worktree:** `D:\PauseGuard-Hydrogen-Integration`
 
 ---
 
-## 1. Root Cause of Earlier PR #20 Revert (`86c6c71` → `dcfcdec`)
+## 1. Root Cause of Earlier PR #20 & Run #43471306451 Failures
 
 Inspection of `origin/feature/member-4-postgres-ci` (`86c6c71` and its revert `dcfcdec`) and `backend/tests_integration/` identified three concrete issues that prevented clean PostgreSQL CI execution:
 
@@ -23,8 +23,8 @@ Inspection of `origin/feature/member-4-postgres-ci` (`86c6c71` and its revert `d
 
 1. **[backend/tests_integration/test_integration.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/test_integration.py):** Removed the duplicate unimported `test_concurrent_cancellation_and_confirmation_are_serialized` function at the end of `test_integration.py` (retaining the authoritative version in `test_payment_ledger_integration.py`).
 2. **[backend/tests_integration/migrations/versions/0003_razorpay_merchant_sandbox.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/migrations/versions/0003_razorpay_merchant_sandbox.py):** Synced revision `0003_razorpay_merchant_sandbox` into the integration test migration directory so `command.upgrade(config, "head")` and `command.downgrade(config, "base")` cover all three revisions (`0001` → `0002` → `0003`).
-3. **[backend/tests_integration/test_payment_ledger_integration.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/test_payment_ledger_integration.py):** Integrated PR #26's 14 `TestGuardianDeadlineTransaction` tests (`9ccc5c0`) and added `test_guardian_cannot_replay_payer_confirm_idempotency_key_in_postgresql` (15 tests total in `TestGuardianDeadlineTransaction`).
-4. **[.github/workflows/python-ci.yml](file:///D:/PauseGuard-Hydrogen-Integration/.github/workflows/python-ci.yml):** Restored the isolated `postgres-integration` job using `postgres:16` service container, healthcheck (`pg_isready`), disposable `pauseguard_test_ci` database (`127.0.0.1:5432`), and `python -m pytest -c backend/pytest_integration.ini backend/tests_integration -v`. Added `"integration/**"` and `"release/**"` to `on.push.branches`.
+3. **[backend/tests_integration/test_payment_ledger_integration.py](file:///D:/PauseGuard-Hydrogen-Integration/backend/tests_integration/test_payment_ledger_integration.py):** Integrated PR #26's `TestGuardianDeadlineTransaction` suite, fixed `test_safe_lock_remains_enforced_after_timeout` (previously expecting `423` on an `AWAITING_FALLBACK_REVIEW` payment that `confirm_payment` rejects with `409` before the live Safe-Lock check) to test both the `AWAITING_FALLBACK_REVIEW` (`409`) guard and a `READY_TO_EXECUTE` + engaged Safe-Lock (`423`) guard with zero debits, and added `test_other_payer_cannot_probe_confirm_idempotency_key_in_postgresql` (16 tests total in `TestGuardianDeadlineTransaction`).
+4. **[.github/workflows/python-ci.yml](file:///D:/PauseGuard-Hydrogen-Integration/.github/workflows/python-ci.yml):** Restored the isolated `postgres-integration` job using `postgres:16` service container, healthcheck (`pg_isready`), disposable `pauseguard_test_ci` database (`127.0.0.1:5432`), and `python -m pytest -c backend/pytest_integration.ini backend/tests_integration -v`. Added `"integration/**"`, `"release/**"`, and `"fix/**"` to `on.push.branches`.
 
 ---
 
@@ -34,9 +34,10 @@ Inspection of `origin/feature/member-4-postgres-ci` (`86c6c71` and its revert `d
   ```powershell
   python -m pytest --collect-only -c backend/pytest_integration.ini backend/tests_integration -q
   ```
-  - **Result:** **70 tests collected in 0.57s** (`42` in `test_integration.py` + `28` in `test_payment_ledger_integration.py`) with 0 import or syntax errors.
-- **Offline Migration Verification (Executed Locally):**
-  - `backend/tests/test_migrations.py` passes as part of the **1,025 passed** offline suite, verifying `0001`, `0002`, and `0003` revision lineage and DDL operations.
+  - **Result:** **71 tests collected in 0.28s** (`42` in `test_integration.py` + `29` in `test_payment_ledger_integration.py`) with 0 import or syntax errors.
+- **Offline Migration & Regression Verification (Executed Locally):**
+  - `backend/tests/test_migrations.py` and `backend/tests/test_v41_closure_regressions.py` pass within the **1,031 passed** offline suite.
 - **Live PostgreSQL Execution Status:**
-  - **Local Host:** **BLOCKED** — Windows service `com.docker.service` is `Stopped` (`open //./pipe/docker_engine: The system cannot find the file specified`), launching `Docker Desktop.exe` from this non-elevated shell did not start the daemon, and no local `postgres.exe` / `psql` binary is installed.
-  - **GitHub Actions Runner (`postgres-integration` job):** Configured and pushed on `release/pauseguard-v4-1-final`. Because `adishbr/PauseGuard` is a private repository and `gh` CLI is not installed in this environment, the remote GitHub Actions check conclusion must be verified in the GitHub UI before merging into `main`.
+  - **Local Host:** **BLOCKED** — Windows service `com.docker.service` is `Stopped` (`open //./pipe/docker_engine: The system cannot find the file specified`), and no local `postgres.exe` / `psql` binary is installed.
+  - **GitHub Actions Runner (`postgres-integration` job):** Configured and pushed on `fix/hydrogen-final-v4-1-closure` to trigger automatically on GitHub Actions. Because `adishbr/PauseGuard` is private and `gh` CLI is absent, verify the `postgres-integration` job status on the PR check tab before merging to `main`.
+
