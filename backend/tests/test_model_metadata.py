@@ -17,6 +17,7 @@ from app.models.metadata import (
     IdentityAssurance,
     LedgerEntry,
     MockAccount,
+    NotificationOutbox,
     OtpChallenge,
     Payment,
     PaymentAppeal,
@@ -51,6 +52,7 @@ ALL_TABLES = [
     "otp_challenges",
     "user_sessions",
     "guardian_invitations",
+    "notification_outbox",
 ]
 
 ALL_MODELS = (
@@ -72,6 +74,7 @@ ALL_MODELS = (
     OtpChallenge,
     UserSession,
     GuardianInvitation,
+    NotificationOutbox,
 )
 
 
@@ -169,6 +172,7 @@ def test_timestamps_are_timezone_aware_and_required():
                     "accepted_at",
                     "step_up_verified_at",
                     "resolved_at",
+                    "delivered_at",
                 ):
                     if field.table.name == "identity_assurances" and field.name == "verified_at":
                         assert field.nullable is False

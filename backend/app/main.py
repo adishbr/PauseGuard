@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from app.api.account import router as account_router
 from app.api.guardian import router as guardian_router
 from app.api.health import router as health_router
+from app.api.notifications import router as notifications_router
 from app.api.payments import router as payments_router
 from app.api.policy_lab import router as policy_lab_router
 from app.api.razorpay import router as razorpay_router
@@ -53,6 +54,7 @@ def create_app(
     application.include_router(auth_v5_router)
     application.include_router(identity_router)
     application.include_router(guardian_router)
+    application.include_router(notifications_router)
     application.include_router(payments_router)
     application.include_router(account_router)
     application.include_router(safe_lock_router)

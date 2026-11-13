@@ -12,6 +12,7 @@ from app.models.identity import (
     UserSession,
 )
 from app.models.ledger import LedgerEntry
+from app.models.notifications import NotificationOutbox
 from app.models.payment import GuardianDecision, Payment, PaymentAppeal
 from app.models.razorpay import RazorpayOrder, RazorpayPayment, RazorpayWebhookEvent
 from app.models.safe_lock import SafeLockState
@@ -27,6 +28,7 @@ __all__ = [
     "IdentityAssurance",
     "LedgerEntry",
     "MockAccount",
+    "NotificationOutbox",
     "OtpChallenge",
     "Payment",
     "PaymentAppeal",

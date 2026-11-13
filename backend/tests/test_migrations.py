@@ -24,6 +24,7 @@ REVISION_0003 = BACKEND / "migrations/versions/0003_razorpay_merchant_sandbox.py
 REVISION_0004 = BACKEND / "migrations/versions/0004_audit_append_sequence.py"
 REVISION_0005 = BACKEND / "migrations/versions/0005_v5_identity_otp_enrollment.py"
 REVISION_0006 = BACKEND / "migrations/versions/0006_v5_appeals_retry_stepup.py"
+REVISION_0007 = BACKEND / "migrations/versions/0007_v5_notification_outbox.py"
 
 ALL_MIGRATION_TABLES = [
     "users",
@@ -44,6 +45,7 @@ ALL_MIGRATION_TABLES = [
     "otp_challenges",
     "user_sessions",
     "guardian_invitations",
+    "notification_outbox",
 ]
 
 
@@ -74,7 +76,7 @@ def declaration(expression, revision_path=REVISION_0001):
 @pytest.fixture
 def declared_schema():
     schema = sa.MetaData()
-    for rev in (REVISION_0001, REVISION_0002, REVISION_0003, REVISION_0005, REVISION_0006):
+    for rev in (REVISION_0001, REVISION_0002, REVISION_0003, REVISION_0005, REVISION_0006, REVISION_0007):
         for call in operations("upgrade", rev):
             if call.func.attr == "add_column":
                 continue
@@ -110,10 +112,12 @@ def test_single_initial_revision_and_no_configured_target():
     config = Config(str(BACKEND / "alembic.ini"))
     assert config.get_main_option("sqlalchemy.url") is None
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0006_v5_appeals_retry_stepup"]
+    assert scripts.get_heads() == ["0007_v5_notification_outbox"]
     head = scripts.get_revision("head")
-    assert head.revision == "0006_v5_appeals_retry_stepup"
-    assert head.down_revision == "0005_v5_identity_otp_enrollment"
+    assert head.revision == "0007_v5_notification_outbox"
+    assert head.down_revision == "0006_v5_appeals_retry_stepup"
+    rev6 = scripts.get_revision("0006_v5_appeals_retry_stepup")
+    assert rev6.down_revision == "0005_v5_identity_otp_enrollment"
     rev5 = scripts.get_revision("0005_v5_identity_otp_enrollment")
     assert rev5.down_revision == "0004_audit_append_sequence"
     rev4 = scripts.get_revision("0004_audit_append_sequence")
@@ -126,7 +130,13 @@ def test_single_initial_revision_and_no_configured_target():
     assert base.down_revision is None
     assert base.dependencies is None
     assert base.branch_labels == set()
-    assert len(list(scripts.walk_revisions())) == 6
+    assert len(list(scripts.walk_revisions())) == 7
+
+
+def test_0007_revision_matches_integration_copy():
+    assert REVISION_0007.read_bytes() == (
+        BACKEND / "tests_integration/migrations/versions/0007_v5_notification_outbox.py"
+    ).read_bytes()
 
 
 def test_0006_revision_matches_integration_copy():

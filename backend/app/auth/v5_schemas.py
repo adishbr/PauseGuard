@@ -1,7 +1,7 @@
 """Typed Pydantic V5 schemas for real account authentication, OTP, identity assurance, and guardian invitations."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -243,5 +243,39 @@ class BackupGuardianActivateResponse(BaseModel):
     assigned_guardian_id: UUID
     guardian_deadline: datetime
     backup_role_slot: str = "backup"
+
+
+class WebSocketTicketResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ticket: str
+    expires_in_seconds: int
+    expires_at: datetime
+    single_use: bool = True
+
+
+class NotificationOutboxItemView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    notification_id: UUID
+    payment_id: str | None = None
+    recipient_user_id: UUID
+    recipient_role: str
+    channel: str
+    event_type: str
+    payload: dict[str, Any]
+    status: str
+    delivery_provider: str
+    attempts: int
+    created_at: datetime
+    delivered_at: datetime | None = None
+
+
+class NotificationOutboxListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: list[NotificationOutboxItemView]
+    total: int
+
 
 
