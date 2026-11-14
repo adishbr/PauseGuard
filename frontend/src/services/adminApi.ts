@@ -30,7 +30,7 @@ import type {
   RazorpayOrderStatusResult,
 } from '../types/admin.ts'
 import { AccountError, sessionExpired } from './accountApi.ts'
-import { isRealBackendMode } from './backendMode.ts'
+import { API_TIMEOUT_MS, apiUrl, isRealBackendMode } from './backendMode.ts'
 
 export class AdminApiError extends Error {
   constructor(message: string) {
@@ -61,12 +61,13 @@ async function adminRequest<T>(
 
   let response: Response
   try {
-    response = await fetch(url, {
+    const targetUrl = url.startsWith('/api/') ? apiUrl(url) : url
+    response = await fetch(targetUrl, {
       method: body ? 'POST' : 'GET',
       headers,
       body: body ? JSON.stringify(body) : undefined,
       cache: 'no-store',
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
     })
   } catch {
     throw new AccountError(0, 'Demo service unavailable. Check your connection and try again.')

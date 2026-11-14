@@ -5,6 +5,7 @@ import { beneficiaries, purposes, scenarios } from '../../mocks/scenarios.ts'
 import { Icon } from '../components/Icon.tsx'
 import { PaymentStatus } from '../components/PaymentStatus.tsx'
 import { accountApi, AccountError } from '../services/accountApi.ts'
+import { isLoopbackHost, isRealBackendMode } from '../services/backendMode.ts'
 import {
   adminCreatePayment,
   adminMockApi,
@@ -49,8 +50,11 @@ export function AdminLogin({ onSession, expired, registrationBlocked = false }: 
   registrationBlocked?: boolean
 }) {
   const [contact, setContact] = useState('')
+  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const loopback = isLoopbackHost()
+  const realBackend = isRealBackendMode()
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -58,10 +62,12 @@ export function AdminLogin({ onSession, expired, registrationBlocked = false }: 
     setBusy(true)
     setError('')
     try {
-      const session = await accountApi.login('admin', contact.trim())
+      const session = realBackend && password.trim()
+        ? await accountApi.v5Login('admin', contact.trim(), password)
+        : await accountApi.login('admin', contact.trim())
       onSession(session)
     } catch (err) {
-      setError(err instanceof AccountError ? err.message : 'Could not sign in. Check the demo service and retry.')
+      setError(err instanceof AccountError ? err.message : 'Could not sign in. Check the admin credentials and retry.')
     } finally {
       setBusy(false)
     }
@@ -111,11 +117,11 @@ export function AdminLogin({ onSession, expired, registrationBlocked = false }: 
       <form onSubmit={(e) => void submit(e)} className="admin-login-form">
         <div className="form-field">
           <label>
-            Provisioned admin email
+            {realBackend ? 'Admin email' : 'Provisioned admin email'}
             <input
               type="text"
               autoComplete="username"
-              placeholder="admin@pauseguard.test"
+              placeholder={loopback ? 'admin@pauseguard.test' : 'admin@yourdomain.com'}
               value={contact}
               onChange={(e) => setContact(e.target.value)}
               disabled={busy}
@@ -124,21 +130,46 @@ export function AdminLogin({ onSession, expired, registrationBlocked = false }: 
           </label>
         </div>
 
+        {realBackend && (
+          <div className="form-field">
+            <label>
+              Admin password {loopback ? '(required on deployed hosts)' : ''}
+              <input
+                type="password"
+                autoComplete="current-password"
+                placeholder="Enter server-configured admin password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={busy}
+                required={!loopback}
+              />
+            </label>
+          </div>
+        )}
+
         {error && <p className="field-error" role="alert">{error}</p>}
 
         <div className="actions">
-          <button className="primary" type="submit" disabled={busy || !contact.trim()}>
+          <button
+            className="primary"
+            type="submit"
+            disabled={busy || !contact.trim() || (realBackend && !loopback && !password.trim())}
+          >
             {busy ? <><span className="spinner" aria-hidden="true" /> Signing in…</> : <><Icon name="shield" size={16} /> Sign in as admin</>}
           </button>
-          <button className="secondary" type="button" disabled={busy} onClick={() => void trySample()}>
-            Open sample admin
-          </button>
+          {loopback && (
+            <button className="secondary" type="button" disabled={busy} onClick={() => void trySample()}>
+              Open sample admin
+            </button>
+          )}
           <a className="text-button" href="/">Return to homepage</a>
         </div>
       </form>
 
       <div className="admin-login-meta">
-        <span className="pill neutral"><Icon name="lock" size={13} /> Provisioned demo identity: <code>admin@pauseguard.test</code></span>
+        {loopback && (
+          <span className="pill neutral"><Icon name="lock" size={13} /> Provisioned demo identity: <code>admin@pauseguard.test</code></span>
+        )}
         <span className="pill neutral">Server-enforced role boundary</span>
       </div>
     </section>

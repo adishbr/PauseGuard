@@ -1,7 +1,7 @@
 import { demoReviewDurationHeader, parseReviewDuration } from '../../mocks/reviewPreference.ts'
 import type { ReviewDuration } from '../../mocks/reviewPreference.ts'
 import { sessionExpired } from './accountApi.ts'
-import { isRealBackendMode } from './backendMode.ts'
+import { API_TIMEOUT_MS, apiUrl, isRealBackendMode } from './backendMode.ts'
 import type { MessageKey } from '../locales/en.ts'
 import type { Role } from '../types/payment.ts'
 import type { CreatePayment, GuardianPayment, PayerPayment } from '../types/payment.ts'
@@ -42,7 +42,7 @@ function isActionAck(payload: unknown, expectedId?: string): payload is { paymen
 
 async function fetchRiskReasons(token: string, id: string, signal?: AbortSignal): Promise<string[]> {
   try {
-    const response = await fetch(`/api/v2/payments/${encodeURIComponent(id)}/risk`, {
+    const response = await fetch(apiUrl(`/api/v2/payments/${encodeURIComponent(id)}/risk`), {
       headers: { Authorization: `Bearer ${token}` },
       cache: 'no-store',
       signal,
@@ -69,13 +69,13 @@ async function request<R extends Role>(role: R, token: string, path: string, opt
   reviewDuration: ReviewDuration | undefined
 }> {
   const { body, id, signal, demoReviewDuration } = options
-  const timeout = AbortSignal.timeout(5_000)
+  const timeout = AbortSignal.timeout(API_TIMEOUT_MS)
   const startedAt = Date.now()
   try {
     const headers = new Headers({ Authorization: `Bearer ${token}` })
     if (body) headers.set('Content-Type', 'application/json')
     if (demoReviewDuration && !isRealBackendMode()) headers.set(demoReviewDurationHeader, String(demoReviewDuration))
-    const response = await fetch(`/api/v2${path}`, {
+    const response = await fetch(apiUrl(`/api/v2${path}`), {
       method: body ? 'POST' : 'GET',
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -158,7 +158,7 @@ export interface V5PaymentAppeal {
 }
 
 export async function listPaymentAppeals(token: string, id: string): Promise<V5PaymentAppeal[]> {
-  const response = await fetch(`/api/v2${paymentPath(id)}/appeals`, {
+  const response = await fetch(apiUrl(`/api/v2${paymentPath(id)}/appeals`), {
     headers: { Authorization: `Bearer ${token}` },
     cache: 'no-store',
   })
@@ -171,7 +171,7 @@ export async function createPaymentAppeal(
   id: string,
   payload: { reason: string; evidenceNote?: string },
 ): Promise<V5PaymentAppeal> {
-  const response = await fetch(`/api/v2${paymentPath(id)}/appeals`, {
+  const response = await fetch(apiUrl(`/api/v2${paymentPath(id)}/appeals`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({
@@ -205,7 +205,7 @@ export interface WsTicketResponse {
 }
 
 export async function issueWsTicket(token: string): Promise<WsTicketResponse> {
-  const response = await fetch('/api/v2/ws/ticket', {
+  const response = await fetch(apiUrl('/api/v2/ws/ticket'), {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -230,7 +230,7 @@ export interface NotificationOutboxItem {
 
 export async function listNotificationOutbox(token: string, limit = 20): Promise<NotificationOutboxItem[]> {
   if (!isRealBackendMode()) return []
-  const response = await fetch(`/api/v2/notifications/outbox?limit=${encodeURIComponent(String(limit))}`, {
+  const response = await fetch(apiUrl(`/api/v2/notifications/outbox?limit=${encodeURIComponent(String(limit))}`), {
     headers: { Authorization: `Bearer ${token}` },
   })
   if (!response.ok) throw httpError(response.status)

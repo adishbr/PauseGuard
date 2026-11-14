@@ -1,8 +1,10 @@
 """Run locally with: python -m uvicorn app.main:app --host 127.0.0.1"""
 
+import os
 import time
 from uuid import uuid4
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.account import router as account_router
 from app.api.bank import router as bank_router
@@ -42,6 +44,26 @@ def create_app(
     )
     application.state.settings = config
     application.state.session_factory = session_factory
+
+    cors_origins = [
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("PAUSEGUARD_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if cors_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Idempotency-Key",
+                "X-Correlation-ID",
+            ],
+        )
 
     @application.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):

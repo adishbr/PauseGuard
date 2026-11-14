@@ -9,7 +9,7 @@ import type {
   Relationship,
 } from '../types/account.ts'
 import type { Locale } from '../locales/messages.ts'
-import { isLoopbackHost, isRealBackendMode } from './backendMode.ts'
+import { API_TIMEOUT_MS, apiUrl, isLoopbackHost, isRealBackendMode } from './backendMode.ts'
 import { storageRead, storageWrite } from './demoSession.ts'
 
 export const sessionExpired = 'pauseguard:session-expired'
@@ -32,9 +32,10 @@ async function request<T>(basePath: string, path: string, token?: string, body?:
   if (body) headers.set('Content-Type', 'application/json')
   let response: Response
   try {
-    response = await fetch(basePath + path, {
+    const targetUrl = basePath.startsWith('/api/') ? apiUrl(basePath + path) : basePath + path
+    response = await fetch(targetUrl, {
       method, headers, body: body ? JSON.stringify(body) : undefined,
-      cache: 'no-store', signal: AbortSignal.timeout(5_000),
+      cache: 'no-store', signal: AbortSignal.timeout(API_TIMEOUT_MS),
     })
   } catch {
     throw new AccountError(0, isRealBackendMode()

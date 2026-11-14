@@ -355,3 +355,77 @@ def test_acceptance_19_local_providers_fail_closed_in_production_like_settings()
         )
     assert getattr(exc2.value, "status_code", None) == 503
 
+
+def test_acceptance_20_env_configured_admin_login_works_with_demo_auth_disabled(monkeypatch):
+    from app.services.account_auth_service import hash_password
+
+    admin_email = "ops-admin@pauseguard.test"
+    admin_password = "RenderAdmin!StrongPassword99"
+    monkeypatch.setenv("PAUSEGUARD_ADMIN_EMAIL", admin_email)
+    monkeypatch.setenv("PAUSEGUARD_ADMIN_PASSWORD_HASH", hash_password(admin_password))
+    monkeypatch.setenv("PAUSEGUARD_RAZORPAY_TEST_ENABLED", "true")
+    monkeypatch.setenv("RZP_TEST_KEY_ID", "rzp_test_configured123")
+    monkeypatch.setenv("RZP_TEST_KEY_SECRET", "rzp_secret_placeholder")
+    monkeypatch.setattr("app.services.razorpay_service._global_razorpay_service", None)
+
+    app = create_app(Settings(environment="test", mode="mock", allow_demo_auth=False, allow_demo_admin=False))
+    with TestClient(app) as tc:
+        # Wrong password fails closed
+        bad = tc.post("/api/v2/auth/login", json={"email": admin_email, "password": "wrong-password"})
+        assert bad.status_code == 401
+
+        # Public signup with configured admin email is rejected
+        shadow = tc.post(
+            "/api/v2/auth/signup",
+            json={"email": admin_email, "password": admin_password, "full_name": "Shadow", "role": "payer"},
+        )
+        assert shadow.status_code == 409
+
+        # Valid admin password issues pg_v5_ token with admin role
+        ok = tc.post("/api/v2/auth/login", json={"email": admin_email, "password": admin_password})
+        assert ok.status_code == 200, ok.text
+        data = ok.json()
+        assert data["access_token"].startswith("pg_v5_")
+        assert data["role"] == "admin"
+        headers = {"Authorization": f"Bearer {data['access_token']}"}
+
+        prof = tc.get("/api/v2/profile", headers=headers)
+        assert prof.status_code == 200
+        assert "admin" in prof.json()["roles"]
+
+        rzp = tc.get("/api/v2/sandbox/razorpay/config", headers=headers)
+        assert rzp.status_code == 200
+        assert rzp.json()["key_id"] == "rzp_test_configured123"
+
+        lab = tc.post(
+            "/api/v2/policy-lab/simulate",
+            headers=headers,
+            json={"sample_size": 30, "seed": 42, "baseline_a_threshold_paise": 5000000},
+        )
+        assert lab.status_code == 200
+
+
+def test_acceptance_21_cors_allows_only_configured_origins(monkeypatch):
+    monkeypatch.setenv("PAUSEGUARD_CORS_ORIGINS", "https://pauseguard-frontend.onrender.com")
+    app = create_app(Settings(environment="test", mode="mock", allow_demo_auth=False, allow_demo_admin=False))
+    with TestClient(app) as tc:
+        allowed = tc.options(
+            "/api/v2/auth/login",
+            headers={
+                "Origin": "https://pauseguard-frontend.onrender.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert allowed.status_code == 200
+        assert allowed.headers.get("access-control-allow-origin") == "https://pauseguard-frontend.onrender.com"
+
+        blocked = tc.options(
+            "/api/v2/auth/login",
+            headers={
+                "Origin": "https://evil.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert blocked.headers.get("access-control-allow-origin") is None
+
+

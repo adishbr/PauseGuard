@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sessionExpired } from '../services/accountApi.ts'
-import { isRealBackendMode } from '../services/backendMode.ts'
+import { apiWsUrl, isRealBackendMode } from '../services/backendMode.ts'
 import { ApiError, getPayment, issueWsTicket, paymentError } from '../services/paymentApi.ts'
 import { terminalStatuses } from '../types/payment.ts'
 import type { Role } from '../types/payment.ts'
@@ -12,8 +12,7 @@ const wsPingMs = 25_000
 const maxWsRetries = 5
 
 function buildWebSocketUrl(ticket: string): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/api/v2/ws?ticket=${encodeURIComponent(ticket)}`
+  return apiWsUrl(`/api/v2/ws?ticket=${encodeURIComponent(ticket)}`)
 }
 
 export function usePayment(role: Role, token: string, id: string) {

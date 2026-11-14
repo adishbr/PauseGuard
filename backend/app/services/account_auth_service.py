@@ -9,13 +9,15 @@ SECURITY INVARIANTS:
   so real mock-mode tests work seamlessly across PostgreSQL and local mock previews.
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import os
 import re
 import secrets
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -69,6 +71,27 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def load_configured_admin_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str] | None:
+    """Load optional server-configured Admin email and scrypt password hash.
+
+    Fails closed (returns None) if either variable is missing or malformed.
+    """
+    source = os.environ if environ is None else environ
+    raw_email = (source.get("PAUSEGUARD_ADMIN_EMAIL") or "").strip()
+    raw_hash = (source.get("PAUSEGUARD_ADMIN_PASSWORD_HASH") or "").strip()
+    if not raw_email or not raw_hash:
+        return None
+    cleaned_email = normalize_email(raw_email)
+    if not _EMAIL_RE.match(cleaned_email):
+        return None
+    parts = raw_hash.split("$")
+    if len(parts) != 6 or parts[0] != "scrypt":
+        return None
+    return cleaned_email, raw_hash
+
+
 class AccountAuthService:
     """Authoritative V5 account lifecycle and bearer session service."""
 
@@ -119,7 +142,11 @@ class AccountAuthService:
                 detail="Password must be at least 8 characters long.",
             )
 
-        if self.get_user_by_email(cleaned_email) is not None:
+        configured_admin = load_configured_admin_credentials()
+        if (
+            self.get_user_by_email(cleaned_email) is not None
+            or (configured_admin is not None and cleaned_email == configured_admin[0])
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="An account with this email already exists.",
@@ -280,32 +307,83 @@ class AccountAuthService:
             "verified_at": result.verified_at,
         }
 
-    def login(
+    def _ensure_configured_admin_account(
         self,
         *,
         email: str,
-        password: str,
-        now: datetime | None = None,
-    ) -> dict[str, Any]:
-        cleaned_email = normalize_email(email)
-        user = self.get_user_by_email(cleaned_email)
-        if user is None or not verify_password(password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password.",
-            )
-        if not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account is deactivated.",
-            )
-        if not user.email_verified:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Email address is not verified yet. Complete OTP verification before signing in.",
-            )
+        password_hash: str,
+        current_time: datetime,
+    ) -> Any:
+        admin_id = uuid5(NAMESPACE_DNS, f"pauseguard-admin:{email}")
+        if self._db is not None:
+            from app.models.identity import UserAccount
+            from app.models.user import RoleBinding, SyntheticUser
 
-        current_time = now or datetime.now(timezone.utc)
+            existing = self.get_user_by_email(email)
+            if existing is not None:
+                existing.password_hash = password_hash
+                existing.role = UserRole.ADMIN.value
+                existing.is_active = True
+                existing.email_verified = True
+                existing.updated_at = current_time
+                self._db.flush()
+                return existing
+
+            self._db.add(SyntheticUser(id=admin_id, created_at=current_time))
+            self._db.flush()
+            self._db.add(RoleBinding(user_id=admin_id, role=UserRole.ADMIN, created_at=current_time))
+            account_row = UserAccount(
+                id=admin_id,
+                email=email,
+                full_name="PauseGuard Admin",
+                role=UserRole.ADMIN.value,
+                password_hash=password_hash,
+                email_verified=True,
+                is_active=True,
+                is_synthetic=False,
+                email_verified_at=current_time,
+                created_at=current_time,
+                updated_at=current_time,
+            )
+            self._db.add(account_row)
+            self._db.flush()
+            return account_row
+
+        assert self._mock_store is not None
+        with self._mock_store.lock:
+            existing_id = self._mock_store.users_by_email.get(email)
+            if existing_id is not None and existing_id in self._mock_store.users_by_id:
+                rec = self._mock_store.users_by_id[existing_id]
+                rec.password_hash = password_hash
+                rec.role = UserRole.ADMIN.value
+                rec.is_active = True
+                rec.email_verified = True
+                rec.updated_at = current_time
+                return rec
+
+            rec = MockUserAccountRecord(
+                id=admin_id,
+                email=email,
+                full_name="PauseGuard Admin",
+                role=UserRole.ADMIN.value,
+                password_hash=password_hash,
+                email_verified=True,
+                is_active=True,
+                is_synthetic=False,
+                email_verified_at=current_time,
+                created_at=current_time,
+                updated_at=current_time,
+            )
+            self._mock_store.users_by_id[admin_id] = rec
+            self._mock_store.users_by_email[email] = admin_id
+            return rec
+
+    def _create_session_for_user(
+        self,
+        user: Any,
+        *,
+        current_time: datetime,
+    ) -> dict[str, Any]:
         expires_at = current_time + timedelta(hours=_SESSION_TTL_HOURS)
         raw_token = f"pg_v5_{secrets.token_urlsafe(32)}"
         token_digest = hash_session_token(raw_token)
@@ -356,6 +434,49 @@ class AccountAuthService:
             "identity_verified": assurance is not None,
             "is_synthetic": user.is_synthetic,
         }
+
+    def login(
+        self,
+        *,
+        email: str,
+        password: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        cleaned_email = normalize_email(email)
+        current_time = now or datetime.now(timezone.utc)
+
+        configured_admin = load_configured_admin_credentials()
+        if configured_admin is not None and cleaned_email == configured_admin[0]:
+            if not verify_password(password, configured_admin[1]):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid email or password.",
+                )
+            admin_user = self._ensure_configured_admin_account(
+                email=configured_admin[0],
+                password_hash=configured_admin[1],
+                current_time=current_time,
+            )
+            return self._create_session_for_user(admin_user, current_time=current_time)
+
+        user = self.get_user_by_email(cleaned_email)
+        if user is None or not verify_password(password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password.",
+            )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is deactivated.",
+            )
+        if not user.email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email address is not verified yet. Complete OTP verification before signing in.",
+            )
+
+        return self._create_session_for_user(user, current_time=current_time)
 
     def revoke_session(self, raw_token: str, *, now: datetime | None = None) -> bool:
         current_time = now or datetime.now(timezone.utc)
