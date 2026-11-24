@@ -1407,3 +1407,146 @@ html[data-theme='light'] .nav-tab[aria-current='page'] {
   background: var(--brand-tint);
 }
 
+
+/* Interior pages share the public site's pause motif, drawn here without a canvas. */
+.app {
+  --aqua: #86e6dc;
+  --paper: #131a2a;
+  --rail: #101323;
+  --rule: #344258;
+  --wash: #1c333d;
+  --ink: #f2f4fa;
+  --muted: #bdc9d7;
+  color: var(--ink);
+  min-height: 100svh;
+  background: radial-gradient(ellipse at 90% 0, #242741, transparent 38rem), #0c1020;
+}
+[data-theme='light'] .app {
+  --aqua: #136968;
+  --paper: #fffdf9;
+  --rail: #f0efea;
+  --rule: #ccd5d6;
+  --wash: #daefeb;
+  --ink: #142530;
+  --muted: #465964;
+  background: #f6f5ef;
+}
+.app .site-header { background: var(--rail); border-color: var(--rule); }
+.app .frame { width: min(calc(100% - 2rem), 80rem); }
+.app .card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 1rem;
+  box-shadow: none;
+}
+.app .card-header { padding-bottom: 1rem; border-bottom: 1px solid var(--rule); }
+.app .eyebrow { color: var(--aqua); font-family: ui-monospace, monospace; }
+.app .intro { padding-block: clamp(2rem, 5vw, 5rem); }
+.app .intro h1:lang(en), .app .card-header h2:lang(en), .app .admin-header-copy h1 {
+  font-family: Georgia, serif;
+  font-weight: 400;
+  line-height: 1.08;
+}
+.app .intro h1 em { color: var(--aqua); }
+.app .intro-mark { background: transparent; transform: rotate(10deg); }
+.app .intro-mark::before, .app .intro-mark::after, .app .auth-stage::after {
+  content: '';
+  background: linear-gradient(130deg, #c8fff0 2%, #59b5b9 35%, #776ab1 70%, #c5bdfe);
+  border: 1px solid #d0e6f2;
+  border-radius: .5rem;
+}
+.app .intro-mark::before, .app .intro-mark::after { inset: 10% 54% 10% 24%; }
+.app .intro-mark::after { transform: translateX(145%); }
+.app .auth-stage {
+  background: var(--rail);
+  border-color: var(--rule);
+  padding: clamp(1rem, 4vw, 4rem);
+}
+.app .auth-stage::before {
+  background: radial-gradient(ellipse at 12% 80%, #8985ca33, transparent 45%),
+    repeating-linear-gradient(115deg, transparent 0 3.5rem, #728b9b18 3.5rem calc(3.5rem + 1px));
+}
+.app .auth-stage::after {
+  z-index: -1; position: absolute; width: 8%; height: 88%; left: 18%; top: 22%;
+  transform: rotate(23deg); box-shadow: 8rem -2rem 0 #8893c4; opacity: .32;
+}
+.app .auth-card { background: var(--paper); color: var(--ink); }
+.app .auth-card .card-header-block { text-align: start; }
+.app .auth-card .eyebrow { justify-content: start; }
+.app .auth-card .card-header-block h1 { font-weight: 400; font-size: clamp(2.4rem, 5vw, 4rem); }
+.app .auth-card .form-note, .app .auth-card .field-help { color: var(--muted); }
+.app .auth-card .card-header-block .form-note { margin-inline: 0; }
+.app .auth-card .sample-access { justify-content: start; }
+.app .intro-mark svg { display: none; }
+.app .payment-steps { background: var(--rail); border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; }
+.app .payment-steps li { border-radius: 0; }
+.app .payment-steps [aria-current='step'] { box-shadow: inset 0 -2px var(--aqua); }
+.app .amount-field input { font: 500 clamp(1.65rem, 4vw, 2.5rem)/1.3 ui-monospace, monospace; }
+.app .amount-field > span { color: var(--aqua); }
+.app .guardian-workspace-card .inbox {
+  padding: clamp(1rem, 3vw, 2rem);
+  background: var(--wash);
+  border-inline-start: .3rem solid var(--aqua);
+}
+.app .status-card { border-inline-start: .3rem solid var(--aqua); }
+.app .status-card.tone-caution { border-inline-start-color: var(--amber); }
+.app .status-card.tone-danger { border-inline-start-color: var(--danger); }
+.app .enrollment-item, .app .profile-settings-card fieldset {
+  border: 0; border-top: 1px solid var(--rule); border-radius: 0;
+  padding: 1.2rem 0; background: transparent;
+}
+.app .admin-header, .app .emergency-helpline-panel { padding: clamp(1rem, 3vw, 2rem); background: var(--wash); border-radius: 1rem; }
+.app .admin-tab[aria-selected='true'], .app .account-nav [aria-current='page'] { background: var(--wash); color: var(--aqua); }
+.app .account-nav a:focus-visible, .app input:focus-visible { outline: 3px solid var(--aqua); outline-offset: 2px; }
+@media (min-width: 50rem) {
+  .app .auth-card {
+    display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1fr);
+    column-gap: 3rem; width: min(100%, 57rem);
+  }
+  .app .auth-card > * { grid-column: 2; }
+  .app .auth-card > .card-header-block { grid-column: 1; grid-row: 1 / span 6; border-inline-end: 1px solid var(--rule); padding-inline-end: 2rem; }
+  .app .workspace { grid-template-columns: minmax(0, 1fr) minmax(15rem, .42fr); gap: clamp(1.5rem, 4vw, 4rem); }
+  .app .side-column { border-inline-start: 1px solid var(--rule); padding-inline-start: 1.25rem; }
+  .app .side-column .card { border: 0; background: transparent; border-radius: 0; padding-inline: 0; }
+  .app .protocol-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 75rem) {
+  .app:has(.account-nav) { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); grid-template-rows: auto 1fr auto; }
+  .app:has(.account-nav) .site-header { display: contents; }
+  .app:has(.account-nav) .topbar, .app:has(.account-nav) main, .app:has(.account-nav) .site-footer { grid-column: 2; width: min(calc(100% - 4rem), 84rem); }
+  .app:has(.account-nav) .topbar { grid-row: 1; border-bottom: 1px solid var(--rule); }
+  .app .account-nav { grid-column: 1; grid-row: 1 / 4; align-self: stretch; width: 100%; padding: 2rem .85rem; background: var(--rail); border-inline-end: 1px solid var(--rule); flex-direction: column; align-items: stretch; }
+  .app .nav-primary-links { flex-direction: column; align-items: stretch; }
+  .app .account-nav a { padding: .9rem 1rem; }
+  .app .nav-utility-group { margin: 1rem 0; border-top: 1px solid var(--rule); }
+  .app:has(.account-nav) main { grid-row: 2; min-width: 0; }
+  .app:has(.account-nav) .site-footer { grid-row: 3; }
+}
+@media (max-width: 40rem) {
+  .app .intro-mark { display: none; }
+  .app .nav-primary-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .app .account-nav a { gap: .4rem; }
+  .app .payment-details { grid-template-columns: 1fr; }
+  .app .status-card .actions > button { flex: 1 1 10rem; }
+  .app .auth-stage { padding: .7rem; }
+}
+
+/* The testing console groups modes above the active instrument panel. */
+.app .admin-mode-tabs { grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); }
+.app .admin-mode-tabs .admin-tab { border-radius: 0; border: 0; border-bottom: 2px solid var(--rule); background: transparent; box-shadow: none; }
+.app .admin-mode-tabs .admin-tab-active { border-color: var(--aqua); background: var(--wash); color: var(--ink); }
+.app .admin-recent-item, .app .admin-endpoint-item { border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; }
+.app .admin-audit-metrics dd, .app .timer-value { font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.help-recovery-card .protocol-grid { gap: 0; }
+.help-recovery-card .protocol-card { border: 0; border-radius: 0; border-top: 1px solid var(--line-strong); background: transparent; padding: 1.25rem; }
+.app .guardian-privacy-summary-card { background: var(--rail); }
+.app .site-footer { overflow-wrap: anywhere; }
+@media (min-width: 50rem) {
+  .app .admin-login-card {
+    max-width: 52rem; display: grid; grid-template-columns: 1fr 1fr;
+    column-gap: 2rem; align-items: start; padding: 2.5rem;
+  }
+  .app .admin-login-card > * { grid-column: 2; }
+  .app .admin-login-header { grid-column: 1; grid-row: 1 / span 5; flex-direction: column; }
+  .app .admin-login-header h1 { font: 400 2.5rem/1.1 Georgia, serif; }
+}
