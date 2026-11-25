@@ -1,137 +1,240 @@
-/* Workspace styles. Tailwind is loaded once by src/styles.css; tokens below are scoped to .app
-   so the homepage's own theme tokens are never overridden. Palette follows the cinematic
-   midnight-ink / pearl direction (cyan edges, soft violet). */
+/* Workspace base tokens & Indic variable fonts.
+   Strictly scoped to .app so the approved homepage (/) is never altered. */
 
 @font-face {
-  font-family: 'Noto Sans Kannada Variable';
+  font-family: "Noto Sans Kannada Variable";
   font-style: normal;
   font-display: swap;
   font-weight: 100 900;
-  src: url('@fontsource-variable/noto-sans-kannada/files/noto-sans-kannada-kannada-wght-normal.woff2') format('woff2-variations');
-  unicode-range: U+0951-0952,U+0964-0965,U+0C80-0CF3,U+1CD0,U+1CD2-1CD3,U+1CDA,U+1CF2,U+1CF4,U+200C-200D,U+20B9,U+25CC,U+A830-A835;
+  src: url("@fontsource-variable/noto-sans-kannada/files/noto-sans-kannada-kannada-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range:
+    U+0951-0952, U+0964-0965, U+0C80-0CF3, U+1CD0, U+1CD2-1CD3, U+1CDA, U+1CF2, U+1CF4, U+200C-200D,
+    U+20B9, U+25CC, U+A830-A835;
 }
 
 @font-face {
-  font-family: 'Noto Sans Devanagari Variable';
+  font-family: "Noto Sans Devanagari Variable";
   font-style: normal;
   font-display: swap;
   font-weight: 100 900;
-  src: url('@fontsource-variable/noto-sans-devanagari/files/noto-sans-devanagari-devanagari-wght-normal.woff2') format('woff2-variations');
-  unicode-range: U+0900-097F,U+1CD0-1CF9,U+200C-200D,U+20A8,U+20B9,U+20F0,U+25CC,U+A830-A839,U+A8E0-A8FF,U+11B00-11B09;
+  src: url("@fontsource-variable/noto-sans-devanagari/files/noto-sans-devanagari-devanagari-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range:
+    U+0900-097F, U+1CD0-1CF9, U+200C-200D, U+20A8, U+20B9, U+20F0, U+25CC, U+A830-A839, U+A8E0-A8FF,
+    U+11B00-11B09;
 }
 
 @font-face {
-  font-family: 'Noto Sans Telugu Variable';
+  font-family: "Noto Sans Telugu Variable";
   font-style: normal;
   font-display: swap;
   font-weight: 100 900;
-  src: url('@fontsource-variable/noto-sans-telugu/files/noto-sans-telugu-telugu-wght-normal.woff2') format('woff2-variations');
-  unicode-range: U+0951-0952,U+0964-0965,U+0C00-0C7F,U+1CDA,U+1CF2,U+200C-200D,U+25CC;
+  src: url("@fontsource-variable/noto-sans-telugu/files/noto-sans-telugu-telugu-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range: U+0951-0952, U+0964-0965, U+0C00-0C7F, U+1CDA, U+1CF2, U+200C-200D, U+25CC;
 }
 
 .app,
-html[data-theme='dark'] .app {
-  font-family: 'Noto Sans Kannada Variable', 'Noto Sans Devanagari Variable', 'Noto Sans Telugu Variable',
-    'Schibsted Grotesk', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+html[data-theme="dark"] .app {
+  font-family:
+    "Noto Sans Kannada Variable",
+    "Noto Sans Devanagari Variable",
+    "Noto Sans Telugu Variable",
+    "Schibsted Grotesk",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  --pg-serif: "Instrument Serif", ui-serif, Georgia, "Times New Roman", serif;
+  --pg-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
   color-scheme: dark;
   color: var(--ink);
   font-synthesis: none;
+
   --page: oklch(0.145 0.028 272);
-  --ink: oklch(0.965 0.008 255);
-  --muted: oklch(0.8 0.025 262);
-  --muted-dark: oklch(0.72 0.03 262);
+  --ink: oklch(0.968 0.008 255);
+  --muted: oklch(0.785 0.024 262);
+  --muted-dark: oklch(0.65 0.028 264);
+
+  /* Matches homepage --primary / --primary-foreground exactly in dark mode */
   --brand-accent: oklch(0.88 0.115 200);
-  --brand-accent-hover: oklch(0.94 0.08 200);
+  --brand-accent-hover: oklch(0.925 0.095 200);
   --brand-contrast: oklch(0.17 0.035 272);
-  --brand-tint: oklch(0.26 0.05 270);
-  --brand-line: oklch(0.62 0.1 230);
-  --brand-glow: oklch(0.88 0.115 200 / 0.32);
-  --border: oklch(0.9 0.03 250 / 0.16);
-  --border-subtle: oklch(0.9 0.03 250 / 0.1);
-  --glass-border: oklch(0.9 0.08 205 / 0.24);
-  --glass-highlight: oklch(0.98 0.02 220 / 0.14);
-  --glass-fill: linear-gradient(140deg, oklch(0.32 0.05 275 / 0.5) 0%, oklch(0.2 0.04 272 / 0.66) 48%, oklch(0.15 0.03 272 / 0.84) 100%);
+  --brand-violet: oklch(0.72 0.155 296);
+  --brand-tint: oklch(0.255 0.048 232 / 0.65);
+  --brand-line: oklch(0.76 0.105 205 / 0.45);
+  --brand-glow: oklch(0.88 0.115 200 / 0.34);
+
+  --border: oklch(0.9 0.03 250 / 0.13);
+  --border-subtle: oklch(0.9 0.03 250 / 0.08);
+  --glass-border: oklch(0.9 0.08 205 / 0.22);
+  --glass-highlight: oklch(0.985 0.02 205 / 0.12);
+  --glass-fill: linear-gradient(
+    155deg,
+    oklch(0.245 0.04 272 / 0.66) 0%,
+    oklch(0.185 0.033 272 / 0.78) 55%,
+    oklch(0.16 0.029 272 / 0.88) 100%
+  );
   --workspace-backdrop:
-    radial-gradient(60rem 36rem at 88% 12rem, oklch(0.26 0.07 285 / 0.5), transparent 72%),
-    radial-gradient(44rem 34rem at 6% 46rem, oklch(0.24 0.06 230 / 0.4), transparent 74%),
-    linear-gradient(180deg, oklch(0.13 0.03 274), oklch(0.145 0.028 272) 40%, oklch(0.135 0.026 272));
+    radial-gradient(58rem 36rem at 82% 8%, oklch(0.26 0.07 288 / 0.48), transparent 70%),
+    radial-gradient(48rem 34rem at 10% 62%, oklch(0.24 0.06 222 / 0.38), transparent 72%),
+    linear-gradient(
+      180deg,
+      oklch(0.13 0.03 274),
+      oklch(0.145 0.028 272) 42%,
+      oklch(0.135 0.026 272)
+    );
+
   --surface: oklch(0.18 0.032 272);
   --surface-raised: oklch(0.215 0.036 272);
-  --surface-inset: oklch(0.155 0.03 272);
-  --surface-hover: oklch(0.26 0.045 275);
-  --line-strong: oklch(0.55 0.05 265);
-  --danger: oklch(0.72 0.17 22);
-  --danger-bg: oklch(0.25 0.06 20);
-  --amber: oklch(0.83 0.15 80);
-  --amber-bg: oklch(0.26 0.05 75);
-  --control-radius: .75rem;
-  --control-height: 3.1rem;
-  --shadow-elevated: 0 24px 56px -18px oklch(0.04 0.02 272 / 0.85), 0 0 36px -10px oklch(0.88 0.115 200 / 0.12);
-  --shadow-glow: 0 0 0 1px oklch(0.88 0.115 200 / 0.35), 0 10px 32px -12px var(--brand-glow);
-  min-height: 100vh;
+  --surface-inset: oklch(0.148 0.028 272 / 0.88);
+  --surface-hover: oklch(0.255 0.042 274);
+  --line-strong: oklch(0.88 0.04 255 / 0.24);
+
+  --danger: oklch(0.72 0.175 22);
+  --danger-ink: oklch(0.94 0.05 20);
+  --danger-bg: oklch(0.24 0.065 20 / 0.72);
+  --danger-border: oklch(0.68 0.16 22 / 0.45);
+
+  --amber: oklch(0.84 0.145 80);
+  --amber-ink: oklch(0.94 0.06 82);
+  --amber-bg: oklch(0.255 0.055 76 / 0.7);
+  --amber-border: oklch(0.78 0.14 78 / 0.42);
+
+  --mint: oklch(0.86 0.125 182);
+  --mint-bg: oklch(0.25 0.055 188 / 0.65);
+
+  --control-radius: 0.85rem;
+  --control-height: 2.95rem;
+  --shadow-elevated:
+    inset 0 1px 0 0 var(--glass-highlight), 0 28px 64px -28px oklch(0.04 0.02 272 / 0.88);
+  --shadow-glow:
+    0 0 0 1px oklch(0.88 0.115 200 / 0.4), 0 12px 34px -12px oklch(0.88 0.115 200 / 0.5);
+
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
   background: var(--workspace-backdrop);
+  background-color: var(--page);
+  overflow-x: clip;
 }
 
-html[data-theme='light'] .app {
+html[data-theme="light"] .app {
   color-scheme: light;
   --page: oklch(0.975 0.007 255);
-  --ink: oklch(0.2 0.04 272);
+  --ink: oklch(0.195 0.04 272);
   --muted: oklch(0.43 0.035 268);
-  --muted-dark: oklch(0.5 0.03 265);
-  --brand-accent: oklch(0.47 0.17 293);
-  --brand-accent-hover: oklch(0.4 0.17 293);
-  --brand-contrast: oklch(0.99 0.004 255);
-  --brand-tint: oklch(0.94 0.035 290);
-  --brand-line: oklch(0.72 0.1 285);
-  --brand-glow: oklch(0.6 0.17 295 / 0.22);
-  --border: oklch(0.3 0.04 270 / 0.14);
-  --border-subtle: oklch(0.3 0.04 270 / 0.2);
-  --glass-border: oklch(0.6 0.1 215 / 0.3);
-  --glass-highlight: oklch(1 0 0 / 0.95);
-  --glass-fill: linear-gradient(140deg, oklch(1 0 0 / 0.92) 0%, oklch(0.985 0.006 255 / 0.88) 48%, oklch(0.965 0.01 250 / 0.94) 100%);
+  --muted-dark: oklch(0.53 0.03 265);
+
+  /* Matches Pearl homepage --primary & crisp contrast */
+  --brand-accent: oklch(0.23 0.05 272);
+  --brand-accent-hover: oklch(0.3 0.065 274);
+  --brand-contrast: oklch(0.985 0.005 255);
+  --brand-violet: oklch(0.5 0.17 293);
+  --brand-tint: oklch(0.935 0.026 240 / 0.85);
+  --brand-line: oklch(0.54 0.12 225 / 0.42);
+  --brand-glow: oklch(0.52 0.13 235 / 0.22);
+
+  --border: oklch(0.28 0.04 270 / 0.13);
+  --border-subtle: oklch(0.28 0.04 270 / 0.08);
+  --glass-border: oklch(0.55 0.1 220 / 0.28);
+  --glass-highlight: oklch(1 0 0 / 0.92);
+  --glass-fill: linear-gradient(
+    155deg,
+    oklch(1 0 0 / 0.86) 0%,
+    oklch(0.99 0.005 255 / 0.82) 55%,
+    oklch(0.975 0.009 250 / 0.9) 100%
+  );
   --workspace-backdrop:
-    radial-gradient(56rem 34rem at 88% 12rem, oklch(0.9 0.05 290 / 0.55), transparent 72%),
-    radial-gradient(42rem 32rem at 6% 46rem, oklch(0.92 0.045 215 / 0.55), transparent 74%),
-    oklch(0.975 0.007 255);
-  --surface: oklch(0.995 0.003 255);
-  --surface-raised: oklch(0.955 0.01 255);
-  --surface-inset: oklch(0.93 0.012 255);
-  --surface-hover: oklch(0.93 0.03 285);
-  --line-strong: oklch(0.65 0.03 260);
-  --danger: oklch(0.53 0.2 27);
-  --danger-bg: oklch(0.94 0.04 20);
-  --amber: oklch(0.55 0.14 65);
-  --amber-bg: oklch(0.95 0.05 85);
-  --shadow-elevated: 0 20px 48px -14px oklch(0.25 0.04 272 / 0.16), 0 0 32px -10px oklch(0.6 0.17 295 / 0.12);
-  --shadow-glow: 0 0 0 1px oklch(0.6 0.17 295 / 0.25), 0 10px 28px -12px var(--brand-glow);
+    radial-gradient(58rem 36rem at 82% 8%, oklch(0.92 0.042 290 / 0.72), transparent 70%),
+    radial-gradient(48rem 34rem at 10% 62%, oklch(0.93 0.038 215 / 0.72), transparent 72%),
+    linear-gradient(180deg, oklch(0.985 0.005 255), oklch(0.975 0.007 255));
+
+  --surface: oklch(0.996 0.003 255);
+  --surface-raised: oklch(0.958 0.01 255);
+  --surface-inset: oklch(0.995 0.003 255);
+  --surface-hover: oklch(0.935 0.018 262);
+  --line-strong: oklch(0.32 0.045 270 / 0.24);
+
+  --danger: oklch(0.5 0.195 25);
+  --danger-ink: oklch(0.38 0.16 25);
+  --danger-bg: oklch(0.955 0.032 20);
+  --danger-border: oklch(0.62 0.16 24 / 0.4);
+
+  --amber: oklch(0.48 0.14 64);
+  --amber-ink: oklch(0.36 0.12 62);
+  --amber-bg: oklch(0.96 0.042 84);
+  --amber-border: oklch(0.68 0.14 72 / 0.42);
+
+  --mint: oklch(0.42 0.12 192);
+  --mint-bg: oklch(0.94 0.035 196);
+
+  --shadow-elevated:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.95), 0 24px 56px -28px oklch(0.28 0.05 270 / 0.22);
+  --shadow-glow:
+    0 0 0 1px oklch(0.23 0.05 272 / 0.22), 0 12px 28px -12px oklch(0.35 0.1 265 / 0.35);
 }
 
-.app :is(h1, h2) em { font-family: 'Instrument Serif', ui-serif, Georgia, serif; font-weight: 400; }
-.app.public-help { min-height: auto; padding-block: 2rem 4rem; }
-
-/* Custom subtle scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: var(--surface-inset);
-}
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 99rem;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--line-strong);
+.app.public-help {
+  min-height: auto;
+  background: transparent;
+  padding-block: 1.5rem 4rem;
 }
 
-a, button, input, select { -webkit-tap-highlight-color: transparent; }
-button, input, select { font: inherit; }
-button:not(:disabled), select:not(:disabled) { cursor: pointer; }
-button:disabled, fieldset:disabled { opacity: .6; cursor: not-allowed; }
-.app :focus-visible { outline: 3px solid var(--brand-accent); outline-offset: 4px; }
-.app ::selection { background: var(--brand-accent); color: var(--brand-contrast); }
+.app a,
+.app button,
+.app input,
+.app select {
+  -webkit-tap-highlight-color: transparent;
+}
 
-:lang(kn) .eyebrow, :lang(hi) .eyebrow, :lang(te) .eyebrow { letter-spacing: normal; }
-:lang(kn) h1, :lang(hi) h1, :lang(te) h1,
-:lang(kn) h2, :lang(hi) h2, :lang(te) h2 { letter-spacing: normal; line-height: 1.28; }
+.app button,
+.app input,
+.app select {
+  font: inherit;
+}
+
+.app button:not(:disabled),
+.app select:not(:disabled) {
+  cursor: pointer;
+}
+
+.app button:disabled,
+.app fieldset:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.app :focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 3px;
+}
+
+.app ::selection {
+  background: color-mix(in oklab, var(--brand-accent) 36%, transparent);
+  color: var(--ink);
+}
+
+.app :lang(kn) .eyebrow,
+.app :lang(hi) .eyebrow,
+.app :lang(te) .eyebrow,
+:lang(kn) .app .eyebrow,
+:lang(hi) .app .eyebrow,
+:lang(te) .app .eyebrow {
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+:lang(kn) .app h1,
+:lang(hi) .app h1,
+:lang(te) .app h1,
+:lang(kn) .app h2,
+:lang(hi) .app h2,
+:lang(te) .app h2 {
+  letter-spacing: normal;
+  line-height: 1.32;
+}
